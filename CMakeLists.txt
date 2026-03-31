@@ -19,6 +19,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # install scripts
 add_library(accumulator_component SHARED src/accumulator.cpp)
@@ -47,6 +49,21 @@ ament_target_dependencies(path_publisher_component
   rclcpp_components
 )
 
+add_library(image_saver_component SHARED src/image_saver.cpp)
+ament_target_dependencies(image_saver_component
+  rclcpp
+  sensor_msgs
+  cv_bridge
+  OpenCV
+  rclcpp_components
+)
+
+add_library(odom_saver_component SHARED src/odom_saver.cpp)
+ament_target_dependencies(odom_saver_component
+  rclcpp
+  nav_msgs
+  rclcpp_components
+)
 
 rclcpp_components_register_node(
     accumulator_component
@@ -64,6 +81,18 @@ rclcpp_components_register_node(
     path_publisher_component
     PLUGIN "airlab_lidar_3dgs::PathPublisher"
     EXECUTABLE path_publisher_node
+)
+
+rclcpp_components_register_node(
+    image_saver_component
+    PLUGIN "airlab_lidar_3dgs::ImageSaver"
+    EXECUTABLE image_saver_node
+)
+
+rclcpp_components_register_node(
+    odom_saver_component
+    PLUGIN "airlab_lidar_3dgs::OdomSaver"
+    EXECUTABLE odom_saver_node
 )
 
 ament_export_targets(export_accumulator_component)
@@ -84,6 +113,22 @@ install(TARGETS global_processor_component
 ament_export_targets(export_path_publisher_component)
 install(TARGETS path_publisher_component
   EXPORT export_path_publisher_component
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  )
+
+ament_export_targets(export_image_saver_component)
+install(TARGETS image_saver_component
+  EXPORT export_image_saver_component
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  )
+
+  ament_export_targets(export_odom_saver_component)
+install(TARGETS odom_saver_component
+  EXPORT export_odom_saver_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -112,8 +157,6 @@ install(DIRECTORY
 install(
   DIRECTORY rviz/
   DESTINATION share/${PROJECT_NAME}/rviz)
-
-
 
 
 # --- Standalone utilities (no ROS2 dependencies) ---

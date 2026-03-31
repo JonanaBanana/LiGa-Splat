@@ -8,19 +8,40 @@ import os
 
 def generate_launch_description():
     pkg_dir = get_package_share_directory('airlab_lidar_3dgs')
+    output_dir = '/home/airlab/dataset/airlab_3dgs/test1'
 
     """Parameters for the composed nodes"""
-    in_topic = '/isaacsim/lidar'
+    lidar_topic = '/isaacsim/lidar'
     accumulated_topic = '/airlab_lidar_3dgs/accumulated_point_cloud'
     global_topic = '/airlab_lidar_3dgs/global_point_cloud'
+    
     odom_topic = '/isaacsim/odom'
     path_topic = '/airlab_lidar_3dgs/path'
 
+    image_topic = '/isaacsim/rgb'
+    image_save_interval = 10
+    image_prefix = 'frame'
+
+    odom_save_interval = 1
+
     frame_id = 'World'
 
-    leaf_size = 0.02
+    leaf_size = 0.03
 
-    output_location = '/home/airlab/dataset/airlab_3dgs/test1/global_point_cloud.pcd'
+    """Do not change these subdirectories as they are used by the nodes to save data in an organized manner."""
+    """Subdirectories"""
+    pcd_output_dir = os.path.join(output_dir, 'pcd')
+    image_output_dir = os.path.join(output_dir, 'images')
+    timestamp_dir = os.path.join(output_dir, 'timestamps')
+    """Output File Locations"""
+    pcd_output_location = os.path.join(pcd_output_dir, 'global_point_cloud.pcd')
+    image_timestamp_output_location = os.path.join(timestamp_dir, 'image_timestamps.csv')
+    odom_timestamp_output_location = os.path.join(timestamp_dir, 'odom_timestamps.csv')
+
+    """Create necessary directories if they don't exist."""
+    os.makedirs(pcd_output_dir, exist_ok=True)
+    os.makedirs(image_output_dir, exist_ok=True)
+    os.makedirs(timestamp_dir, exist_ok=True)
 
     """Generate launch description with multiple components."""
     container = ComposableNodeContainer(
@@ -34,7 +55,7 @@ def generate_launch_description():
                     plugin='airlab_lidar_3dgs::PointCloudAccumulator',
                     name='accumulator_node',
                     parameters=[{
-                        'input_topic': in_topic,
+                        'input_topic': lidar_topic,
                         'output_topic': accumulated_topic,
                         'frame_id': frame_id
                     }],
@@ -49,7 +70,7 @@ def generate_launch_description():
                         'output_topic': global_topic,
                         'frame_id': frame_id,
                         'leaf_size': leaf_size,
-                        'output_location': output_location
+                        'output_location': pcd_output_location
                     }],
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
@@ -61,6 +82,30 @@ def generate_launch_description():
                         'odom_topic': odom_topic,
                         'path_topic': path_topic,
                         'frame_id': frame_id
+                    }],
+                    extra_arguments=[{'use_intra_process_comms': True}]
+                ),
+                ComposableNode(
+                    package='airlab_lidar_3dgs',
+                    plugin='airlab_lidar_3dgs::ImageSaver',
+                    name='image_saver_node',
+                    parameters=[{
+                        'image_topic': image_topic,
+                        'save_interval': image_save_interval,
+                        'image_dir': image_output_dir,
+                        'timestamp_file': image_timestamp_output_location,
+                        'image_prefix': image_prefix
+                    }],
+                    extra_arguments=[{'use_intra_process_comms': True}]
+                ),
+                ComposableNode(
+                    package='airlab_lidar_3dgs',
+                    plugin='airlab_lidar_3dgs::OdomSaver',
+                    name='odom_saver_node',
+                    parameters=[{
+                        'odom_topic': odom_topic,
+                        'output_file': odom_timestamp_output_location,
+                        'save_interval': odom_save_interval
                     }],
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
