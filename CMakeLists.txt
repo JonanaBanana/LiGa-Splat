@@ -21,6 +21,8 @@ find_package(pcl_conversions REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # install scripts
 add_library(accumulator_component SHARED src/accumulator.cpp)
@@ -158,13 +160,15 @@ install(
   DIRECTORY rviz/
   DESTINATION share/${PROJECT_NAME}/rviz)
 
+  install(
+    DIRECTORY config/
+    DESTINATION share/${PROJECT_NAME}/config)
 
 # --- Standalone utilities (no ROS2 dependencies) ---
 # --- ROS2 can be used to run the utils (for example: ros2 run airlab_3dgs pcd_viewer)---
 add_executable(pcd_viewer utils/pcd_viewer.cpp)
 target_include_directories(pcd_viewer PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(pcd_viewer ${PCL_LIBRARIES})
-
 install(TARGETS pcd_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -172,9 +176,23 @@ install(TARGETS pcd_viewer
 add_executable(camera_pose_estimator utils/camera_pose_estimator.cpp)
 target_include_directories(camera_pose_estimator PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(camera_pose_estimator ${PCL_LIBRARIES})
-
 install(TARGETS camera_pose_estimator 
   DESTINATION lib/${PROJECT_NAME}
 )
+
+add_executable(color_registration utils/color_registration.cpp)
+target_include_directories(color_registration PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(color_registration ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
+install(TARGETS color_registration DESTINATION lib/${PROJECT_NAME})
+
+add_executable(color_reconstruction utils/color_reconstruction.cpp)
+target_include_directories(color_reconstruction PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(color_reconstruction ${PCL_LIBRARIES})
+install(TARGETS color_reconstruction DESTINATION lib/${PROJECT_NAME})
+
+add_executable(colmap_export utils/colmap_export.cpp)
+target_include_directories(colmap_export PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(colmap_export ${PCL_LIBRARIES} yaml-cpp)
+install(TARGETS colmap_export DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
