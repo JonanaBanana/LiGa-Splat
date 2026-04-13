@@ -10,6 +10,30 @@ This work is a successor to [MESSER for 3DGS](https://github.com/JonanaBanana/ME
 
 This package has been tested with Ubuntu 22.04 and ROS2 Humble.
 
+## Dependencies
+
+- ROS2 (Humble or later)
+- PCL, OpenCV, Eigen3, yaml-cpp
+- OpenMP (for parallelised utilities)
+
+```bash
+sudo apt install ros-$ROS_DISTRO-pcl-conversions ros-$ROS_DISTRO-cv-bridge \
+     libyaml-cpp-dev libopencv-dev libeigen3-dev
+```
+If you only need the utility code and dont want to install ROS2, you can skip installing ROS2 and ROS2 packages, and simply run the scripts in the utils/ folder as standalone scripts. They do not depend on ROS2.
+
+---
+
+## Build
+
+```bash
+cd ~/ros2_ws
+colcon build --packages-select liga_splat
+source install/setup.bash
+```
+Again, skip this part if you do not want to use ROS2.
+---
+
 ## Overview
 
 The pipeline has two phases:
@@ -58,52 +82,112 @@ Sensor topics
 
 ---
 
-## Dependencies
-
-- ROS2 (Humble or later)
-- PCL, OpenCV, Eigen3, yaml-cpp
-- OpenMP (for parallelised utilities)
-
-```bash
-sudo apt install ros-$ROS_DISTRO-pcl-conversions ros-$ROS_DISTRO-cv-bridge \
-     libyaml-cpp-dev libopencv-dev libeigen3-dev
-```
-
----
-
-## Build
-
-```bash
-cd ~/ros2_ws
-colcon build --packages-select liga_splat
-source install/setup.bash
-```
-
----
-
 ## Configuration
 
-All user-specific paths and tuning parameters live in one file:
+The pipeline uses two configuration files.
 
+---
+
+### `config/launch_config.cfg` — Phase 1 (ROS2 launch)
+
+Edit this before running the ROS2 launch files. It controls topic names, output paths, and real-time point cloud management.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `output_dir` | — | Root folder where captured data (images, point cloud, timestamps) is saved |
+| `bag_output_dir` | — | Folder for rosbag recordings (used by `record_bag_launch`) |
+| `lidar_topic` | `/isaacsim/lidar` | ROS topic for incoming `PointCloud2` messages |
+| `odom_topic` | `/isaacsim/odom` | ROS topic for incoming `Odometry` messages |
+| `image_topic` | `/isaacsim/rgb` | ROS topic for incoming `Image` messages |
+| `image_save_interval` | `10` | Save every Nth image frame to disk |
+| `image_prefix` | `frame` | Filename prefix for saved images (e.g. `frame_0001.png`) |
+| `odom_save_interval` | `1` | Save every Nth odometry message to `timestamps/odom.csv` |
+| `leaf_size` | `0.03` | Voxel grid leaf size in metres used by both the accumulator and global processor |
+| `max_path_length` | `10000` | Maximum number of odometry poses kept in the visualised path |
+| `accumulator_max_points` | `500000` | The `PointCloudAccumulator` voxel-filters and forwards its buffer to the `GlobalProcessor` when the accumulated point count reaches this threshold |
+| `accumulator_publish_interval` | `100` | Also forward the buffer every N LiDAR frames regardless of size (set to `0` to disable) |
+| `global_downsample_interval` | `5` | The `GlobalProcessor` runs a periodic voxel downsample on the global map every N received batches |
+| `global_max_points` | `5000000` | Hard cap on the global cloud; if exceeded after a periodic downsample a second pass at `2× leaf_size` is applied to bring it back under budget |
+| `frame_id` | `World` | TF frame ID stamped on all published point cloud messages |
+
+---
+
+### `config.cfg` — Phase 2 (per-dataset, offline utilities)
+
+This file lives inside each **data folder** (i.e. `<output_dir>/config.cfg`). It is read by every offline utility in Phase 2. Copy or create it manually for each dataset before running the utilities.
+
+#### Pose estimation
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `time_delay` | `0.0` | Seconds added to each image timestamp before matching against odometry. Use a positive value to compensate for camera trigger latency (delays the image timestamp so it aligns with a later odometry sample); use a negative value to advance it. |
+
+#### Camera intrinsics
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `focal_length` | `1000.0` | Camera focal length in pixels (assumes equal horizontal and vertical focal length, i.e. square pixels) |
+| `image_width` | `1920` | Image width in pixels |
+| `image_height` | `1080` | Image height in pixels |
+| `principal_x` | `960.0` | Horizontal principal point (optical centre) in pixels |
+| `principal_y` | `540.0` | Vertical principal point (optical centre) in pixels |
+
+#### Point cloud filtering (registration step)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `voxel_size` | `0.05` | Voxel grid leaf size in metres used to downsample `pcd/input.pcd` before colour registration |
+| `min_depth` | `1.0` | Minimum camera-frame depth (metres) for a point to be projected onto an image |
+| `max_depth` | `200.0` | Maximum camera-frame depth (metres); points beyond this are ignored |
+| `filter_outliers` | `true` | Apply Statistical Outlier Removal (SOR) before voxel downsampling |
+| `sor_neighbors` | `10` | Number of nearest neighbours used by the SOR filter |
+| `sor_std_ratio` | `2.0` | Standard-deviation multiplier threshold for SOR; points further than `sor_std_ratio × σ` from the mean neighbour distance are removed |
+
+#### Hidden point removal
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `hpr_radius` | `25000.0` | Radius parameter for the Hidden Point Removal (HPR) algorithm used during colour registration. Smaller values are more aggressive at removing occluded points. |
+| `depth_render_hpr_radius` | `40000.0` | HPR radius used specifically by the `depth_renderer` utility. Can be tuned independently of `hpr_radius`. |
+
+#### Background sphere
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `fill_background` | `false` | When `true`, a uniformly-sampled sphere of points is added around the scene centroid before registration. Useful for sparse scenes where the 3DGS optimiser would otherwise place large "background blobs" at arbitrary distances. |
+| `sphere_radius` | `50.0` | Radius of the background sphere in metres |
+| `sphere_num_points` | `50000` | Number of points uniformly sampled on the background sphere |
+
+#### Camera–body transform
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `trans_mat` | (see below) | Row-major 4×4 homogeneous transform matrix **from camera frame to body frame** (T_body_cam). Provide 16 space- or comma-separated values. The default converts from a z-forward / x-right / y-down camera frame to an x-forward / y-left / z-up body frame. |
+| `poses_are_body_frame` | `true` | Set to `true` if the saved odometry poses are expressed in the body/robot frame (most common). Set to `false` if poses are already in the camera frame, in which case `trans_mat` is ignored. |
+
+Default `trans_mat` (row-major):
 ```
-config/launch_config.cfg
+[0,  0,  1, 0,
+-1,  0,  0, 0,
+ 0, -1,  0, 0,
+ 0,  0,  0, 1]
 ```
 
-Edit this before running anything. Key fields:
+#### File paths (relative to `data_folder`)
 
-| Key | Description |
-|-----|-------------|
-| `output_dir` | Root folder where captured data is saved |
-| `bag_output_dir` | Folder for rosbag recordings |
-| `lidar_topic` | ROS topic for incoming `PointCloud2` messages |
-| `image_topic` | ROS topic for incoming `Image` messages |
-| `odom_topic` | ROS topic for incoming `Odometry` messages |
-| `leaf_size` | Voxel grid leaf size in metres (e.g. `0.03`) |
-| `image_save_interval` | Save every Nth image frame |
-| `accumulator_max_points` | Publish accumulated cloud after this many points |
-| `global_max_points` | Hard cap on the global cloud before aggressive downsampling |
+These rarely need to change unless you have reorganised the folder layout.
 
-A `config.cfg` file also lives in each **data folder** (copied or created manually) and holds the per-dataset parameters used by the offline utilities (camera intrinsics, transform matrix, depth range, etc.).
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pcd_file` | `pcd/input.pcd` | Raw captured point cloud written by Phase 1 |
+| `downsampled_file` | `pcd/downsampled.pcd` | Filtered + optionally sphere-padded cloud written by `registration` |
+| `reconstructed_file` | `pcd/reconstructed.pcd` | Coloured point cloud written by `reconstruction` |
+| `poses_file` | `poses.csv` | Interpolated camera poses written by `pose_estimator` |
+| `registration_file` | `color_registration.csv` | Per-point colour observations written by `registration` |
+| `pose_timestamps_file` | `timestamps/odom.csv` | Odometry timestamps written by Phase 1 |
+| `image_timestamps_file` | `timestamps/image.csv` | Image timestamps written by Phase 1 |
+| `images_dir` | `distorted/images` | Directory containing the saved camera frames |
+| `depth_dir` | `depth_renders` | Directory where `depth_renderer` writes float32 TIFF depth maps |
 
 ---
 
@@ -160,6 +244,9 @@ ros2 run liga_splat <utility> <data_folder> [options]
 where `<data_folder>` is the `output_dir` you set in `launch_config.cfg`.
 
 Each utility reads its parameters from `<data_folder>/config.cfg`.
+
+> **Before running any Phase 2 utility**, copy the template config into your data folder and edit it to match your camera and scene.
+> At minimum, set the camera intrinsics (`focal_length`, `image_width`, `image_height`, `principal_x`, `principal_y`) and the camera-to-body transform (`trans_mat`). Without this file the utilities will fall back to built-in defaults, which will produce incorrect results.
 
 ---
 
@@ -276,30 +363,32 @@ ros2 launch liga_splat data_saver_launch.py
 
 DATA=~/dataset/my_scene
 
-# 3. Estimate poses
+# 3. Place a config.cfg in your data folder (copy from config/config.cfg and edit)
+cp install/liga_splat/share/liga_splat/config/config.cfg $DATA/config.cfg
+
+# 4. Estimate poses
 ros2 run liga_splat pose_estimator $DATA
 
-# 4. Colour the point cloud
+# 5. Colour the point cloud
 ros2 run liga_splat registration $DATA
 
-# 5. Fuse colours
+# 6. Fuse colours
 ros2 run liga_splat reconstruction $DATA
 
-# 6. Export COLMAP
+# 7. Export COLMAP
 ros2 run liga_splat export_colmap $DATA
 
-# 7. Render depth maps
+# 8. Render depth maps
 ros2 run liga_splat depth_renderer $DATA --dense
 
-# 8. Convert for 3DGS
+# 9. Convert for 3DGS
 ros2 run liga_splat prepare_depth_for_3dgs $DATA
 
-# 9. Train 3DGS (example — adjust paths as needed)
-CUDA_VISIBLE_DEVICES=0 python train.py \
+# 10. Train 3DGS (example — adjust paths as needed)
+python train.py \
     -s $DATA/distorted \
-    --data_factor 1 \
     -d $DATA/distorted/depth \
-    --depth_params $DATA/distorted/sparse/0/depth_params.json
+    -r 1
 ```
 
 ---
