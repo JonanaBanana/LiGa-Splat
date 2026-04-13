@@ -4,7 +4,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 
-namespace airlab_lidar_3dgs {
+namespace liga_splat {
 class PathPublisher : public rclcpp::Node
 {
 public:
@@ -12,7 +12,7 @@ public:
   : Node("path_publisher", options)
   {
     declare_parameter<std::string>("odom_topic", "/odom");
-    declare_parameter<std::string>("path_topic", "/airlab_lidar_3dgs/path");
+    declare_parameter<std::string>("path_topic", "/liga_splat/path");
     declare_parameter<std::string>("frame_id", "World");
     declare_parameter<int>("max_path_length", 10000);
 
@@ -60,5 +60,5 @@ private:
   nav_msgs::msg::Path path_;
 };
 
-RCLCPP_COMPONENTS_REGISTER_NODE(airlab_lidar_3dgs::PathPublisher)
-} // namespace airlab_lidar_3dgs
+RCLCPP_COMPONENTS_REGISTER_NODE(liga_splat::PathPublisher)
+} // namespace liga_splat

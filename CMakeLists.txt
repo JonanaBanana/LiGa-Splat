@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(airlab_lidar_3dgs)
+project(liga_splat)
 
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
@@ -70,31 +70,31 @@ ament_target_dependencies(odom_saver_component
 
 rclcpp_components_register_node(
     accumulator_component
-    PLUGIN "airlab_lidar_3dgs::PointCloudAccumulator"
+    PLUGIN "liga_splat::PointCloudAccumulator"
     EXECUTABLE accumulator_node
 )
 
 rclcpp_components_register_node(
     global_processor_component
-    PLUGIN "airlab_lidar_3dgs::GlobalProcessor"
+    PLUGIN "liga_splat::GlobalProcessor"
     EXECUTABLE global_processor_node
 )
 
 rclcpp_components_register_node(
     path_publisher_component
-    PLUGIN "airlab_lidar_3dgs::PathPublisher"
+    PLUGIN "liga_splat::PathPublisher"
     EXECUTABLE path_publisher_node
 )
 
 rclcpp_components_register_node(
     image_saver_component
-    PLUGIN "airlab_lidar_3dgs::ImageSaver"
+    PLUGIN "liga_splat::ImageSaver"
     EXECUTABLE image_saver_node
 )
 
 rclcpp_components_register_node(
     odom_saver_component
-    PLUGIN "airlab_lidar_3dgs::OdomSaver"
+    PLUGIN "liga_splat::OdomSaver"
     EXECUTABLE odom_saver_node
 )
 

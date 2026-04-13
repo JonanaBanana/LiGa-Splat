@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>airlab_lidar_3dgs</name>
+  <name>liga_splat</name>
   <version>0.0.0</version>
-  <description>lidar visual 3dgs</description>
+  <description>LiGa Splat — LiDAR-Guided 3D Gaussian Splatting pipeline</description>
   <maintainer email="202004778@post.au.dk">Jonathan Nielsen</maintainer>
   <license>Apache-2.0</license>
 

@@ -1,4 +1,4 @@
-# airlab_lidar_3dgs
+# LiGa Splat
 
 A ROS2 pipeline for capturing LiDAR + camera data and converting it into the COLMAP format required to train a [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) model.
 
@@ -67,7 +67,7 @@ sudo apt install ros-$ROS_DISTRO-pcl-conversions ros-$ROS_DISTRO-cv-bridge \
 
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select airlab_lidar_3dgs
+colcon build --packages-select liga_splat
 source install/setup.bash
 ```
 
@@ -104,7 +104,7 @@ A `config.cfg` file also lives in each **data folder** (copied or created manual
 ### Option A — Record a rosbag first, play back later
 
 ```bash
-ros2 launch airlab_lidar_3dgs record_bag_launch.py
+ros2 launch liga_splat record_bag_launch.py
 ```
 
 Records LiDAR, camera, odometry, and TF to a timestamped bag in `bag_output_dir`.  
@@ -113,7 +113,7 @@ Split size is 1 GB per bag file.
 ### Option B — Save data directly from live topics
 
 ```bash
-ros2 launch airlab_lidar_3dgs data_saver_launch.py
+ros2 launch liga_splat data_saver_launch.py
 ```
 
 Starts five composable nodes in a single container:
@@ -146,7 +146,7 @@ When capture is complete, kill the launch (Ctrl-C). The global cloud is saved au
 All utilities are run as:
 
 ```bash
-ros2 run airlab_lidar_3dgs <utility> <data_folder> [options]
+ros2 run liga_splat <utility> <data_folder> [options]
 ```
 
 where `<data_folder>` is the `output_dir` you set in `launch_config.cfg`.
@@ -160,7 +160,7 @@ Each utility reads its parameters from `<data_folder>/config.cfg`.
 Matches each saved image to an interpolated odometry pose (linear position + SLERP orientation). A `time_delay` parameter compensates for camera trigger latency.
 
 ```bash
-ros2 run airlab_lidar_3dgs pose_estimator <data_folder>
+ros2 run liga_splat pose_estimator <data_folder>
 ```
 
 **Output:** `<data_folder>/poses.csv`
@@ -172,7 +172,7 @@ ros2 run airlab_lidar_3dgs pose_estimator <data_folder>
 Projects the point cloud into each camera image to assign an RGB colour to every visible point. Outputs both a downsampled point cloud (with an optional background sphere added) and a per-point colour observation table.
 
 ```bash
-ros2 run airlab_lidar_3dgs registration <data_folder> [--diag]
+ros2 run liga_splat registration <data_folder> [--diag]
 ```
 
 | Option | Description |
@@ -190,7 +190,7 @@ ros2 run airlab_lidar_3dgs registration <data_folder> [--diag]
 Fuses the multi-view colour observations into a single coloured point cloud. Each point's final colour is the per-channel median across all views, which suppresses shadows, highlights, and moving objects.
 
 ```bash
-ros2 run airlab_lidar_3dgs reconstruction <data_folder> [--ascii]
+ros2 run liga_splat reconstruction <data_folder> [--ascii]
 ```
 
 **Output:** `pcd/reconstructed.pcd`
@@ -202,7 +202,7 @@ ros2 run airlab_lidar_3dgs reconstruction <data_folder> [--ascii]
 Exports poses and point cloud in the COLMAP binary/text format required by 3DGS. Runs hidden-point removal per camera to build realistic 2D observation tracks.
 
 ```bash
-ros2 run airlab_lidar_3dgs export_colmap <data_folder>
+ros2 run liga_splat export_colmap <data_folder>
 ```
 
 **Output:** `distorted/sparse/0/{cameras,images,points3D}.{bin,txt}`
@@ -214,7 +214,7 @@ ros2 run airlab_lidar_3dgs export_colmap <data_folder>
 Renders a float32 depth map (metres) for each camera pose using the downsampled point cloud. Supports optional hidden-point removal and colour-guided dense completion.
 
 ```bash
-ros2 run airlab_lidar_3dgs depth_renderer <data_folder> [--no-hpr] [--dense] [--diag]
+ros2 run liga_splat depth_renderer <data_folder> [--no-hpr] [--dense] [--diag]
 ```
 
 | Option | Description |
@@ -232,7 +232,7 @@ ros2 run airlab_lidar_3dgs depth_renderer <data_folder> [--no-hpr] [--dense] [--
 Converts the float32 TIFF depth maps into 16-bit PNG inverse-depth maps and writes `depth_params.json` — the exact format expected by the depth-regularised 3DGS training script.
 
 ```bash
-ros2 run airlab_lidar_3dgs prepare_depth_for_3dgs <data_folder>
+ros2 run liga_splat prepare_depth_for_3dgs <data_folder>
 ```
 
 **Output:**
@@ -247,10 +247,10 @@ The command also prints the recommended `train.py` invocation at the end.
 
 ```bash
 # View any PCD file (color modes: rgb, z)
-ros2 run airlab_lidar_3dgs pcd_viewer <file.pcd> [rgb|z]
+ros2 run liga_splat pcd_viewer <file.pcd> [rgb|z]
 
 # View odometry path + camera frustums overlaid on the point cloud
-ros2 run airlab_lidar_3dgs pose_viewer <data_folder> [--no-pcd] [--frustum-scale <s>]
+ros2 run liga_splat pose_viewer <data_folder> [--no-pcd] [--frustum-scale <s>]
 ```
 
 ---
@@ -259,32 +259,32 @@ ros2 run airlab_lidar_3dgs pose_viewer <data_folder> [--no-pcd] [--frustum-scale
 
 ```bash
 # 1. Edit config
-nano install/airlab_lidar_3dgs/share/airlab_lidar_3dgs/config/launch_config.cfg
+nano install/liga_splat/share/liga_splat/config/launch_config.cfg
 
 # 2. Capture data
-ros2 launch airlab_lidar_3dgs data_saver_launch.py
+ros2 launch liga_splat data_saver_launch.py
 
 # --- stop capture when done ---
 
 DATA=~/dataset/my_scene
 
 # 3. Estimate poses
-ros2 run airlab_lidar_3dgs pose_estimator $DATA
+ros2 run liga_splat pose_estimator $DATA
 
 # 4. Colour the point cloud
-ros2 run airlab_lidar_3dgs registration $DATA
+ros2 run liga_splat registration $DATA
 
 # 5. Fuse colours
-ros2 run airlab_lidar_3dgs reconstruction $DATA
+ros2 run liga_splat reconstruction $DATA
 
 # 6. Export COLMAP
-ros2 run airlab_lidar_3dgs export_colmap $DATA
+ros2 run liga_splat export_colmap $DATA
 
 # 7. Render depth maps
-ros2 run airlab_lidar_3dgs depth_renderer $DATA --dense
+ros2 run liga_splat depth_renderer $DATA --dense
 
 # 8. Convert for 3DGS
-ros2 run airlab_lidar_3dgs prepare_depth_for_3dgs $DATA
+ros2 run liga_splat prepare_depth_for_3dgs $DATA
 
 # 9. Train 3DGS (example — adjust paths as needed)
 CUDA_VISIBLE_DEVICES=0 python train.py \

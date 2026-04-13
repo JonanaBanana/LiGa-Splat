@@ -13,7 +13,7 @@
 #include <rclcpp_components/register_node_macro.hpp>
 #include <opencv2/imgproc.hpp>
 
-namespace airlab_lidar_3dgs {
+namespace liga_splat {
 class ImageSaver : public rclcpp::Node
 {
 public:
@@ -152,5 +152,5 @@ private:
   std::vector<TimestampEntry> timestamps_;
 };
 
-RCLCPP_COMPONENTS_REGISTER_NODE(airlab_lidar_3dgs::ImageSaver)
-} // namespace airlab_lidar_3dgs
+RCLCPP_COMPONENTS_REGISTER_NODE(liga_splat::ImageSaver)
+} // namespace liga_splat

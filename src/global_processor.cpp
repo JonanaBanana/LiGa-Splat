@@ -12,7 +12,7 @@
 #include "pcl_conversions/pcl_conversions.h"
 #include <rclcpp_components/register_node_macro.hpp>
 
-namespace airlab_lidar_3dgs {
+namespace liga_splat {
 class GlobalProcessor : public rclcpp::Node
 {
 public:
@@ -22,8 +22,8 @@ public:
         const char* home_env = std::getenv("HOME");
         std::string home = home_env ? home_env : "/tmp";
 
-        declare_parameter<std::string>("input_topic",    "/airlab_lidar_3dgs/accumulated_point_cloud");
-        declare_parameter<std::string>("output_topic",   "/airlab_lidar_3dgs/global_point_cloud");
+        declare_parameter<std::string>("input_topic",    "/liga_splat/accumulated_point_cloud");
+        declare_parameter<std::string>("output_topic",   "/liga_splat/global_point_cloud");
         declare_parameter<std::string>("frame_id",       "World");
         declare_parameter<std::string>("output_location", home + "/dataset/airlab_3dgs/pcd/input.pcd");
         declare_parameter<float>("leaf_size",            0.05);
@@ -148,5 +148,5 @@ private:
     pcl::VoxelGrid<PointT_> sor_;
 };
 
-RCLCPP_COMPONENTS_REGISTER_NODE(airlab_lidar_3dgs::GlobalProcessor)
-} // namespace airlab_lidar_3dgs
+RCLCPP_COMPONENTS_REGISTER_NODE(liga_splat::GlobalProcessor)
+} // namespace liga_splat

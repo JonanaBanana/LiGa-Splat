@@ -7,14 +7,14 @@ if [ $# -eq 0 ]
 fi
 file="$1"
 source /home/airlab/ros2_ws/install/setup.bash
-ros2 run airlab_lidar_3dgs pose_estimator "$file"
+ros2 run liga_splat pose_estimator "$file"
 wait
-ros2 run airlab_lidar_3dgs registration "$file" --diag
+ros2 run liga_splat registration "$file" --diag
 wait
-ros2 run airlab_lidar_3dgs reconstruction "$file"
+ros2 run liga_splat reconstruction "$file"
 wait
-ros2 run airlab_lidar_3dgs export_colmap "$file"
+ros2 run liga_splat export_colmap "$file"
 wait
-ros2 run airlab_lidar_3dgs depth_renderer "$file" --diag --dense
+ros2 run liga_splat depth_renderer "$file" --diag --dense
 wait
-ros2 run airlab_lidar_3dgs prepare_depth_for_3dgs "$file"
+ros2 run liga_splat prepare_depth_for_3dgs "$file"

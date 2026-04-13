@@ -10,7 +10,7 @@
 #include "pcl_conversions/pcl_conversions.h"
 #include <rclcpp_components/register_node_macro.hpp>
 
-namespace airlab_lidar_3dgs {
+namespace liga_splat {
 class PointCloudAccumulator : public rclcpp::Node
 {
 public:
@@ -18,7 +18,7 @@ public:
     : Node("point_cloud_accumulator", options)
     {
         declare_parameter<std::string>("input_topic",   "/isaacsim/lidar");
-        declare_parameter<std::string>("output_topic",  "/airlab_lidar_3dgs/accumulated_point_cloud");
+        declare_parameter<std::string>("output_topic",  "/liga_splat/accumulated_point_cloud");
         declare_parameter<std::string>("frame_id",      "World");
         declare_parameter<int>("max_points",      500000); // downsample + publish when cloud exceeds this
         declare_parameter<int>("publish_interval", 100);   // also publish every N frames (0 = disabled)
@@ -107,5 +107,5 @@ private:
     pcl::VoxelGrid<PointT_> vg_;
 };
 
-RCLCPP_COMPONENTS_REGISTER_NODE(airlab_lidar_3dgs::PointCloudAccumulator)
-} // namespace airlab_lidar_3dgs
+RCLCPP_COMPONENTS_REGISTER_NODE(liga_splat::PointCloudAccumulator)
+} // namespace liga_splat

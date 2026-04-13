@@ -10,7 +10,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 
-namespace airlab_lidar_3dgs {
+namespace liga_splat {
 class OdomSaver : public rclcpp::Node
 {
 public:
@@ -115,5 +115,5 @@ private:
   std::vector<OdomEntry> entries_;
 };
 
-RCLCPP_COMPONENTS_REGISTER_NODE(airlab_lidar_3dgs::OdomSaver)
-} // namespace airlab_lidar_3dgs
+RCLCPP_COMPONENTS_REGISTER_NODE(liga_splat::OdomSaver)
+} // namespace liga_splat

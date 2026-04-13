@@ -8,7 +8,7 @@ import yaml
 
 
 def generate_launch_description():
-    pkg_dir = get_package_share_directory('airlab_lidar_3dgs')
+    pkg_dir = get_package_share_directory('liga_splat')
 
     with open(os.path.join(pkg_dir, 'config', 'launch_config.cfg'), 'r') as f:
         cfg = yaml.safe_load(f)
@@ -28,9 +28,9 @@ def generate_launch_description():
     global_downsample_interval   = cfg['global_downsample_interval']
     global_max_points            = cfg['global_max_points']
 
-    accumulated_topic = '/airlab_lidar_3dgs/accumulated_point_cloud'
-    global_topic      = '/airlab_lidar_3dgs/global_point_cloud'
-    path_topic        = '/airlab_lidar_3dgs/path'
+    accumulated_topic = '/liga_splat/accumulated_point_cloud'
+    global_topic      = '/liga_splat/global_point_cloud'
+    path_topic        = '/liga_splat/path'
 
     #Subdirectories
     #Do not change these subdirectories as they are used by the nodes to save data in an organized manner.
@@ -56,8 +56,8 @@ def generate_launch_description():
             executable='component_container',
             composable_node_descriptions=[
                 ComposableNode(
-                    package='airlab_lidar_3dgs',
-                    plugin='airlab_lidar_3dgs::PointCloudAccumulator',
+                    package='liga_splat',
+                    plugin='liga_splat::PointCloudAccumulator',
                     name='accumulator_node',
                     parameters=[{
                         'input_topic': lidar_topic,
@@ -70,8 +70,8 @@ def generate_launch_description():
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
                 ComposableNode(
-                    package='airlab_lidar_3dgs',
-                    plugin='airlab_lidar_3dgs::GlobalProcessor',
+                    package='liga_splat',
+                    plugin='liga_splat::GlobalProcessor',
                     name='global_processor_node',
                     parameters=[{
                         'input_topic': accumulated_topic,
@@ -85,8 +85,8 @@ def generate_launch_description():
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
                 ComposableNode(
-                    package='airlab_lidar_3dgs',
-                    plugin='airlab_lidar_3dgs::PathPublisher',
+                    package='liga_splat',
+                    plugin='liga_splat::PathPublisher',
                     name='path_publisher_node',
                     parameters=[{
                         'odom_topic': odom_topic,
@@ -97,8 +97,8 @@ def generate_launch_description():
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
                 ComposableNode(
-                    package='airlab_lidar_3dgs',
-                    plugin='airlab_lidar_3dgs::ImageSaver',
+                    package='liga_splat',
+                    plugin='liga_splat::ImageSaver',
                     name='image_saver_node',
                     parameters=[{
                         'image_topic': image_topic,
@@ -110,8 +110,8 @@ def generate_launch_description():
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
                 ComposableNode(
-                    package='airlab_lidar_3dgs',
-                    plugin='airlab_lidar_3dgs::OdomSaver',
+                    package='liga_splat',
+                    plugin='liga_splat::OdomSaver',
                     name='odom_saver_node',
                     parameters=[{
                         'odom_topic': odom_topic,

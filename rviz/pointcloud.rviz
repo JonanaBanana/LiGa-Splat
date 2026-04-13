@@ -80,7 +80,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /airlab_lidar_3dgs/accumulated_point_cloud
+        Value: /liga_splat/accumulated_point_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -114,7 +114,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /airlab_lidar_3dgs/global_point_cloud
+        Value: /liga_splat/global_point_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -178,7 +178,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /airlab_lidar_3dgs/path
+        Value: /liga_splat/path
       Value: true
     - Class: rviz_default_plugins/TF
       Enabled: true
