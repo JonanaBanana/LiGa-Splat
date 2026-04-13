@@ -54,7 +54,7 @@ int main(int argc, char** argv)
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(filename, *cloud) == -1)
     {
-        std::cerr << "Error: Could not load file '" << filename << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load file '" << filename << "'" << "\033[0m" << std::endl;
         return 1;
     }
 
@@ -96,6 +96,9 @@ int main(int argc, char** argv)
     }
     else // rgb — load native colors if present, otherwise flat color
     {
+        // Load into PCLPointCloud2 first to inspect field names.
+        // A typed load (PointXYZ) silently drops any fields not in the type,
+        // so we must check the raw header before deciding which loader to use.
         pcl::PCLPointCloud2 header;
         pcl::io::loadPCDFile(filename, header);
 

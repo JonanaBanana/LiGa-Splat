@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -19,10 +20,13 @@ public:
   ImageSaver(const rclcpp::NodeOptions & options)
   : Node("image_saver", options)
   {
+    const char* home_env = std::getenv("HOME");
+    std::string home = home_env ? home_env : "/tmp";
+
     declare_parameter<std::string>("image_topic", "/isaacsim/rgb");
     declare_parameter<int>("save_interval", 10);
-    declare_parameter<std::string>("image_dir", "/home/airlab/dataset/airlab_3dgs/timestamps");
-    declare_parameter<std::string>("timestamp_file", "/home/airlab/dataset/airlab_3dgs/timestamps/image.csv");
+    declare_parameter<std::string>("image_dir", home + "/dataset/airlab_3dgs/distorted/images");
+    declare_parameter<std::string>("timestamp_file", home + "/dataset/airlab_3dgs/timestamps/image.csv");
     declare_parameter<std::string>("image_prefix", "frame");
     image_topic_ = get_parameter("image_topic").as_string();
     save_interval_ = get_parameter("save_interval").as_int();

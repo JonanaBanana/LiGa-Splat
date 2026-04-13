@@ -19,11 +19,11 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/surface/convex_hull.h>
-#include <pcl/visualization/pcl_visualizer.h>
-#include <vtkObject.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include <omp.h>
 
 // ========================= Configuration =========================
 struct Config
@@ -74,7 +74,8 @@ Config load_config(const std::string & path)
     try {
         node = YAML::LoadFile(path);
     } catch (const YAML::Exception & e) {
-        std::cerr << "Error reading config: " << e.what() << std::endl;
+        std::cerr << "\033[31m" << "Error reading config: " << e.what() << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "Using default config values." << "\033[0m" << std::endl;
         cfg.trans_mat << 0,0,1,0, -1,0,0,0, 0,-1,0,0, 0,0,0,1;
         return cfg;
     }
@@ -110,10 +111,11 @@ Config load_config(const std::string & path)
         cfg.trans_mat << 0,0,1,0, -1,0,0,0, 0,-1,0,0, 0,0,0,1;
     }
 
-    cfg.pcd_file         = node["pcd_file"].as<std::string>(cfg.pcd_file);
-    cfg.poses_file       = node["poses_file"].as<std::string>(cfg.poses_file);
-    cfg.images_dir       = node["images_dir"].as<std::string>(cfg.images_dir);
-    cfg.registration_file      = node["registration_file"].as<std::string>(cfg.registration_file);
+    cfg.pcd_file          = node["pcd_file"].as<std::string>(cfg.pcd_file);
+    cfg.downsampled_file  = node["downsampled_file"].as<std::string>(cfg.downsampled_file);
+    cfg.poses_file        = node["poses_file"].as<std::string>(cfg.poses_file);
+    cfg.images_dir        = node["images_dir"].as<std::string>(cfg.images_dir);
+    cfg.registration_file = node["registration_file"].as<std::string>(cfg.registration_file);
 
     return cfg;
 }
@@ -151,14 +153,6 @@ struct ColorObservation
     int point_id;
     float r, g, b;
 };
-
-/* 
-struct ProjPoint
-{
-    int iu, iv;
-    float r, g, b;
-}; 
-*/
 
 struct ProjPoint
 {
@@ -338,7 +332,7 @@ int main(int argc, char** argv)
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_path, *cloud) == -1)
     {
-        std::cerr << "Error: Could not load PCD file '" << pcd_path << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load PCD file '" << pcd_path << "'" << "\033[0m" << std::endl;
         return 1;
     }
     std::cout << "Loaded " << cloud->size() << " points from " << pcd_path << std::endl;
@@ -383,6 +377,10 @@ int main(int argc, char** argv)
 
     if (cfg.fill_background)
     {
+        // A sparse background sphere is added around the scene centroid so that
+        // 3DGS has surface support behind the captured area. Without it, the
+        // Gaussian splatting optimiser tends to place large "background blobs"
+        // at arbitrary distances, which degrades foreground quality.
         // Generate sphere points into a temporary [N x 3] block
         Eigen::MatrixXd sphere_pts(num_sphere, 3);
         Eigen::MatrixXd temp_for_gen(total_points, 3);
@@ -428,33 +426,32 @@ int main(int argc, char** argv)
     }
     std::cout << "Loaded " << image_poses.size() << " image poses" << std::endl;
 
-    // ---- Visualization state ----
-    Eigen::MatrixXf point_colors = Eigen::MatrixXf::Constant(total_points, 3, 0.1f);
-
     // ---- Process each image ----
-    std::vector<ColorObservation> all_observations;
-    all_observations.reserve(total_points * 2);
+    // Use per-image storage so threads never contend on a shared container.
+    // Observations are merged into all_observations after the parallel loop.
+    std::vector<std::vector<ColorObservation>> per_image_obs(image_poses.size());
 
-    // Pre-allocate camera-frame result as [4 x N] — reused each iteration
-    Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, total_points);
-
-    // Pre-allocate buffers, reuse each frame via clear()/resize()
-    std::vector<int> fov_indices;
-    fov_indices.reserve(total_points / 4);
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-
+    #pragma omp parallel for schedule(dynamic)
     for (size_t img_idx = 0; img_idx < image_poses.size(); img_idx++)
     {
         const auto & pose = image_poses[img_idx];
         auto t_img_start = std::chrono::high_resolution_clock::now();
+
+        // Thread-local working buffers
+        Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, total_points);
+        std::vector<int> fov_indices;
+        fov_indices.reserve(total_points / 4);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
 
         // Load image
         std::string img_file = images_dir + pose.filename;
         cv::Mat img = cv::imread(img_file, cv::IMREAD_COLOR);
         if (img.empty())
         {
-            std::cerr << "Warning: Could not load image '" << img_file << "', skipping." << std::endl;
+            std::ostringstream msg;
+            msg << "Warning: Could not load image '" << img_file << "', skipping.\n";
+            #pragma omp critical
+            std::cerr << msg.str();
             continue;
         }
         cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
@@ -464,16 +461,14 @@ int main(int argc, char** argv)
             pose.px, pose.py, pose.pz,
             pose.qx, pose.qy, pose.qz, pose.qw);
 
-        Eigen::Matrix4d T_world_cam = cfg.poses_are_body_frame
-                                     ? T_world_body * cfg.trans_mat
-                                     : T_world_body;
-        Eigen::Matrix4d T_cam_world = T_world_cam.inverse();
+        Eigen::Matrix4d T_cam_world = (cfg.poses_are_body_frame
+                                      ? T_world_body * cfg.trans_mat
+                                      : T_world_body).inverse();
 
-        // Single matrix multiply, no transposes
         // cam_points [4 x N] = T_cam_world [4 x 4] * points_h [4 x N]
         cam_points.noalias() = T_cam_world * points_h;
 
-        // FOV filtering with tangent comparison, cache results in cam_points
+        // FOV filtering
         fov_indices.clear();
 
         for (int i = 0; i < total_points; i++)
@@ -492,7 +487,6 @@ int main(int argc, char** argv)
         if (fov_indices.empty()) continue;
 
         // ---- Hidden point removal ----
-        // Reuse visible_cloud allocation
         visible_cloud->points.resize(fov_indices.size());
         visible_cloud->width = fov_indices.size();
         visible_cloud->height = 1;
@@ -552,13 +546,10 @@ int main(int argc, char** argv)
             float g = (w00 * p00[1] + w10 * p10[1] + w01 * p01[1] + w11 * p11[1]) / 255.0f;
             float b = (w00 * p00[2] + w10 * p10[2] + w01 * p01[2] + w11 * p11[2]) / 255.0f;
 
-            all_observations.push_back({orig_idx, r, g, b});
+            per_image_obs[img_idx].push_back({orig_idx, r, g, b});
 
             if (diagnostics)
             {
-                point_colors(orig_idx, 0) = r;
-                point_colors(orig_idx, 1) = g;
-                point_colors(orig_idx, 2) = b;
                 diag_points.push_back({x0, y0, static_cast<float>(cz)});
             }
 
@@ -607,18 +598,26 @@ int main(int argc, char** argv)
         auto t_img_end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double>(t_img_end - t_img_start).count();
 
-        std::cout << img_idx << "/" << image_poses.size() - 1
-                  << " — " << pose.filename
-                  << ": " << found << " points colored"
-                  << " (" << std::fixed << std::setprecision(2) << elapsed << "s)"
-                  << std::endl;
+        std::ostringstream msg;
+        msg << img_idx << "/" << image_poses.size() - 1
+            << " — " << pose.filename
+            << ": " << found << " points colored"
+            << " (" << std::fixed << std::setprecision(2) << elapsed << "s)\n";
+        #pragma omp critical
+        std::cout << msg.str();
     }
+
+    // ---- Merge per-image observations into a single list ----
+    std::vector<ColorObservation> all_observations;
+    all_observations.reserve(total_points * 2);
+    for (const auto & obs_vec : per_image_obs)
+        all_observations.insert(all_observations.end(), obs_vec.begin(), obs_vec.end());
 
     // ---- Save output CSV ----
     std::ofstream out(output_path);
     if (!out.is_open())
     {
-        std::cerr << "Error: Could not open output file '" << output_path << "'" << std::endl;
+        std::cerr  << "\033[31m" << "Error: Could not open output file '" << output_path << "'" << "\033[0m" << std::endl;
         return 1;
     }
 

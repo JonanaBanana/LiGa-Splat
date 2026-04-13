@@ -16,12 +16,12 @@
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/surface/convex_hull.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include <omp.h>
 
 // ========================= Configuration =========================
 struct Config
@@ -33,13 +33,9 @@ struct Config
     double px = 960.0;
     double py = 540.0;
 
-    // Filtering
-    double voxel_size = 0.03;
+    // Depth range
     double min_depth = 1.0;
     double max_depth = 400.0;
-    bool filter_outliers = true;
-    int sor_neighbors = 10;
-    double sor_std_ratio = 2.0;
 
     // Hidden point removal
     double depth_render_hpr_radius = 40000.0;
@@ -64,7 +60,8 @@ Config load_config(const std::string & path)
     try {
         node = YAML::LoadFile(path);
     } catch (const YAML::Exception & e) {
-        std::cerr << "Error reading config: " << e.what() << std::endl;
+        std::cerr << "\033[31m" <<"Error reading config: " << e.what() << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "Using default config values." << "\033[0m" << std::endl;
         cfg.trans_mat << 0,0,1,0, -1,0,0,0, 0,-1,0,0, 0,0,0,1;
         return cfg;
     }
@@ -129,7 +126,7 @@ std::vector<ImagePose> read_image_poses(const std::string & path)
     std::ifstream file(path);
     if (!file.is_open())
     {
-        std::cerr << "Error: Could not open pose file '" << path << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not open pose file '" << path << "'" << "\033[0m" << std::endl;
         return poses;
     }
 
@@ -401,7 +398,7 @@ int main(int argc, char** argv)
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(data_folder + cfg.downsampled_file, *cloud) == -1)
     {
-        std::cerr << "Error: Could not load PCD file '" << data_folder + cfg.downsampled_file << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load PCD file '" << data_folder + cfg.downsampled_file << "'" << "\033[0m" << std::endl;
         return 1;
     }
     std::cout << "Loaded " << cloud->size() << " points" << std::endl;
@@ -445,32 +442,34 @@ int main(int argc, char** argv)
     double max_proj_x = cfg.img_w - margin_x;
     double max_proj_y = cfg.img_h - margin_y;
 
-    // Pre-allocate reused buffers
-    Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, num_points);
-    std::vector<int> fov_indices;
-    fov_indices.reserve(num_points / 4);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-
     int saved = 0;
 
+    // Each image is fully independent (read-only access to points_h), so the loop
+    // is embarrassingly parallel. Each thread gets its own working buffers.
+    #pragma omp parallel for schedule(dynamic) reduction(+:saved)
     for (size_t img_idx = 0; img_idx < image_poses.size(); img_idx++)
     {
         const auto & pose = image_poses[img_idx];
         auto t0 = std::chrono::high_resolution_clock::now();
+
+        // Thread-local working buffers
+        Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, num_points);
+        std::vector<int> fov_indices;
+        fov_indices.reserve(num_points / 4);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
 
         // Build transform
         Eigen::Matrix4d T_world_body = quat_to_matrix(
             pose.px, pose.py, pose.pz,
             pose.qx, pose.qy, pose.qz, pose.qw);
 
-        Eigen::Matrix4d T_world_cam = cfg.poses_are_body_frame
-                                     ? T_world_body * cfg.trans_mat
-                                     : T_world_body;
+        Eigen::Matrix4d T_cam_world = (cfg.poses_are_body_frame
+                                      ? T_world_body * cfg.trans_mat
+                                      : T_world_body).inverse();
 
-        cam_points.noalias() = T_world_cam.inverse() * points_h;
+        cam_points.noalias() = T_cam_world * points_h;
 
         // FOV filter
-        fov_indices.clear();
         for (int i = 0; i < num_points; i++)
         {
             double cz = cam_points(2, i);
@@ -484,8 +483,11 @@ int main(int argc, char** argv)
 
         if (fov_indices.empty())
         {
-            std::cout << img_idx << "/" << image_poses.size() - 1
-                      << " — " << pose.filename << ": no points in FOV, skipping" << std::endl;
+            std::ostringstream msg;
+            msg << img_idx << "/" << image_poses.size() - 1
+                << " — " << pose.filename << ": no points in FOV, skipping\n";
+            #pragma omp critical
+            std::cout << msg.str();
             continue;
         }
 
@@ -560,17 +562,27 @@ int main(int argc, char** argv)
             }
             else
             {
-                std::cerr << "Warning: could not load '" << images_dir + pose.filename
-                          << "', falling back to morphological completion." << std::endl;
+                std::ostringstream msg;
+                msg << "Warning: could not load '" << images_dir + pose.filename
+                    << "', falling back to morphological completion.\n";
+                #pragma omp critical
+                std::cerr << msg.str();
                 depth_map = complete_depth_map_morphological(depth_map);
             }
         }
 
-        // Save as 32-bit float TIFF (values in metres, 0 = no data)
+        // Save as 32-bit float TIFF (values in metres, 0 = no data).
+        // TIFF is used here because PNG is lossless only for integer types —
+        // float32 depth values would be truncated if written as PNG.
+        // prepare_depth_for_3dgs then converts these TIFFs to 16-bit PNG
+        // inverse-depth maps in the format expected by 3DGS.
         std::string out_path = out_dir + stem(pose.filename) + ".tiff";
         if (!cv::imwrite(out_path, depth_map))
         {
-            std::cerr << "Warning: failed to write '" << out_path << "'" << std::endl;
+            std::ostringstream msg;
+            msg << "Warning: failed to write '" << out_path << "'\n";
+            #pragma omp critical
+            std::cerr << msg.str();
             continue;
         }
         saved++;
@@ -578,38 +590,17 @@ int main(int argc, char** argv)
         // Optional false-colour diagnostics PNG (Turbo colormap, black = no data)
         if (save_diagnostics)
         {
-            // Compute min/max over valid (non-zero) pixels
-            float d_min = std::numeric_limits<float>::max();
-            float d_max = 0.0f;
-            for (int r = 0; r < depth_map.rows; r++)
-                for (int c = 0; c < depth_map.cols; c++)
-                {
-                    float d = depth_map.at<float>(r, c);
-                    if (d > 0.0f) { d_min = std::min(d_min, d); d_max = std::max(d_max, d); }
-                }
+            cv::Mat valid_mask = (depth_map > 0.0f);
+            double d_min, d_max;
+            cv::minMaxLoc(depth_map, &d_min, &d_max, nullptr, nullptr, valid_mask);
 
             cv::Mat norm(cfg.img_h, cfg.img_w, CV_8UC1, cv::Scalar(0));
             if (d_max > d_min)
-            {
-                float range = d_max - d_min;
-                for (int r = 0; r < depth_map.rows; r++)
-                    for (int c = 0; c < depth_map.cols; c++)
-                    {
-                        float d = depth_map.at<float>(r, c);
-                        if (d > 0.0f)
-                            norm.at<uint8_t>(r, c) = static_cast<uint8_t>(
-                                255.0f * (d - d_min) / range);
-                    }
-            }
+                cv::normalize(depth_map, norm, 0, 255, cv::NORM_MINMAX, CV_8UC1, valid_mask);
 
             cv::Mat color;
             cv::applyColorMap(norm, color, cv::COLORMAP_TURBO);
-
-            // Restore black for no-data pixels (colormap maps 0 → a colour, not black)
-            for (int r = 0; r < depth_map.rows; r++)
-                for (int c = 0; c < depth_map.cols; c++)
-                    if (depth_map.at<float>(r, c) == 0.0f)
-                        color.at<cv::Vec3b>(r, c) = {0, 0, 0};
+            color.setTo(cv::Scalar(0, 0, 0), ~valid_mask); // black = no data
 
             cv::imwrite(diagnostics_dir + stem(pose.filename) + ".png", color);
         }
@@ -617,11 +608,13 @@ int main(int argc, char** argv)
         auto t1 = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double>(t1 - t0).count();
 
-        std::cout << img_idx << "/" << image_poses.size() - 1
-                  << " — " << pose.filename
-                  << ": " << projected << " depth points projected"
-                  << " (" << std::fixed << std::setprecision(2) << elapsed << "s)"
-                  << std::endl;
+        std::ostringstream msg;
+        msg << img_idx << "/" << image_poses.size() - 1
+            << " — " << pose.filename
+            << ": " << projected << " depth points projected"
+            << " (" << std::fixed << std::setprecision(2) << elapsed << "s)\n";
+        #pragma omp critical
+        std::cout << msg.str();
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

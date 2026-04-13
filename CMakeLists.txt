@@ -23,6 +23,7 @@ find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # install scripts
 add_library(accumulator_component SHARED src/accumulator.cpp)
@@ -183,7 +184,7 @@ install(TARGETS pose_estimator DESTINATION lib/${PROJECT_NAME})
 
 add_executable(registration utils/registration.cpp)
 target_include_directories(registration PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(registration ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
+target_link_libraries(registration ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
 install(TARGETS registration DESTINATION lib/${PROJECT_NAME})
 
 add_executable(reconstruction utils/reconstruction.cpp)
@@ -193,16 +194,16 @@ install(TARGETS reconstruction DESTINATION lib/${PROJECT_NAME})
 
 add_executable(export_colmap utils/export_colmap.cpp)
 target_include_directories(export_colmap PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(export_colmap ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
+target_link_libraries(export_colmap ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
 install(TARGETS export_colmap DESTINATION lib/${PROJECT_NAME})
 
 add_executable(depth_renderer utils/depth_renderer.cpp)
 target_include_directories(depth_renderer PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(depth_renderer ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
+target_link_libraries(depth_renderer ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
 install(TARGETS depth_renderer DESTINATION lib/${PROJECT_NAME})
 
 add_executable(prepare_depth_for_3dgs utils/prepare_depth_for_3dgs.cpp)
-target_link_libraries(prepare_depth_for_3dgs ${OpenCV_LIBS})
+target_link_libraries(prepare_depth_for_3dgs ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
 install(TARGETS prepare_depth_for_3dgs DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

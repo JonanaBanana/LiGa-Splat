@@ -12,6 +12,15 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 
+// Fuses per-point color observations produced by registration.cpp into a
+// single colored point cloud (XYZ + RGB).
+//
+// Each 3D point may be visible from many camera views, yielding multiple
+// color samples.  The median of each RGB channel is taken independently
+// to suppress outliers from overexposed pixels, shadows, or moving objects.
+//
+// Output: pcd/reconstructed.pcd  —  XYZ+RGB binary PCD
+
 // ========================= Configuration =========================
 struct Config
 {
@@ -31,7 +40,8 @@ Config load_config(const std::string & path)
     try {
         node = YAML::LoadFile(path);
     } catch (const YAML::Exception & e) {
-        std::cerr << "Error reading config: " << e.what() << std::endl;
+        std::cerr << "\033[31m" << "Error reading config: " << e.what() << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "Using default config values." << "\033[0m" << std::endl;
         return cfg;
     }
     cfg.downsampled_file      = node["downsampled_file"].as<std::string>(cfg.downsampled_file);
@@ -84,7 +94,7 @@ int main(int argc, char** argv)
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_path, *cloud) == -1)
     {
-        std::cerr << "Error: Could not load PCD file '" << pcd_path << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load PCD file '" << pcd_path << "'" << "\033[0m" << std::endl;
         return 1;
     }
     int total_points = static_cast<int>(cloud->size());
@@ -96,7 +106,7 @@ int main(int argc, char** argv)
         std::ifstream file(csv_path);
         if (!file.is_open())
         {
-            std::cerr << "Error: Could not open CSV file '" << csv_path << "'" << std::endl;
+            std::cerr << "\033[31m" << "Error: Could not open CSV file '" << csv_path << "'" << "\033[0m" << std::endl;
             return 1;
         }
 
@@ -158,7 +168,9 @@ int main(int argc, char** argv)
         // Skip if point_id is out of range
         if (current_id < 0 || current_id >= total_points) continue;
 
-        // Sort each channel independently (matches Python's np.sort + np.median)
+        // Sort each channel independently before taking the median.
+        // Channels are treated separately (not jointly) so the median colour
+        // is always a valid mixture of observed values even when samples disagree.
         std::sort(rs.begin(), rs.end());
         std::sort(gs.begin(), gs.end());
         std::sort(bs.begin(), bs.end());

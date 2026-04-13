@@ -245,6 +245,8 @@ int main(int argc, char** argv)
         {
             double qx = p.qx, qy = p.qy, qz = p.qz, qw = p.qw;
 
+            // Extract world-space axes from the quaternion rotation matrix columns.
+            // These are the unit vectors pointing forward, right, and up in world space.
             // Forward (X column of rotation matrix)
             double fx = 1.0 - 2.0 * (qy * qy + qz * qz);
             double fy = 2.0 * (qx * qy + qw * qz);
@@ -260,12 +262,18 @@ int main(int argc, char** argv)
             double uy = 2.0 * (qy * qz - qw * qx);
             double uz = 1.0 - 2.0 * (qx * qx + qy * qy);
 
+            // hw/hh: half-width and half-height of the far plane rectangle.
+            // d: depth at which the far plane is placed (equals frustum_scale).
             double hw = frustum_scale * aspect * 0.5;
             double hh = frustum_scale * 0.5;
             double d = frustum_scale;
 
             uint32_t base = frustum_pts->size();
 
+            // Point layout per frustum (base offset):
+            //   0 = camera origin (apex)
+            //   1 = far top-left,  2 = far top-right
+            //   3 = far bot-left,  4 = far bot-right
             frustum_pts->push_back(pcl::PointXYZ(p.px, p.py, p.pz));
             frustum_pts->push_back(pcl::PointXYZ(
                 p.px + d*fx - hw*rx + hh*ux,
@@ -291,6 +299,7 @@ int main(int argc, char** argv)
                 lines.push_back(v);
             };
 
+            // 4 rays from apex to corners, then 4 edges closing the far rectangle
             add_line(0, 1); add_line(0, 2); add_line(0, 3); add_line(0, 4);
             add_line(1, 2); add_line(2, 4); add_line(4, 3); add_line(3, 1);
         }

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstring>
 
+#include <omp.h>
 #include <yaml-cpp/yaml.h>
 #include <Eigen/Dense>
 #include <opencv2/imgcodecs.hpp>
@@ -53,7 +54,8 @@ Config load_config(const std::string & path)
     try {
         node = YAML::LoadFile(path);
     } catch (const YAML::Exception & e) {
-        std::cerr << "Error reading config: " << e.what() << std::endl;
+        std::cerr << "\033[31m" <<"Error reading config: " << e.what() << "\033[0m" <<std::endl;
+        std::cerr << "\033[31m" << "Using default config values." << "\033[0m" << std::endl;
         cfg.trans_mat << 0,0,1,0, -1,0,0,0, 0,-1,0,0, 0,0,0,1;
         return cfg;
     }
@@ -344,6 +346,9 @@ Eigen::Matrix4d quat_to_matrix(double px, double py, double pz,
     return T;
 }
 
+// Converts a rotation matrix to a unit quaternion using Shepperd's method via
+// the 4×4 symmetric traceless matrix K (Bar-Itzhack, 2000).  The quaternion
+// is the eigenvector of K corresponding to its largest eigenvalue.
 // Matches Python's rotmat2qvec exactly (COLMAP read_write_model.py)
 // Python unpacks R.flat (row-major) as: Rxx=R[0,0], Ryx=R[0,1], Rzx=R[0,2],
 //   Rxy=R[1,0], Ryy=R[1,1], Rzy=R[1,2], Rxz=R[2,0], Ryz=R[2,1], Rzz=R[2,2]
@@ -458,7 +463,7 @@ int main(int argc, char** argv)
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
     if (pcl::io::loadPCDFile<pcl::PointXYZRGB>(pcd_path, *cloud) == -1)
     {
-        std::cerr << "Error: Could not load PCD file '" << pcd_path << "'" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load PCD file '" << pcd_path << "'" << "\033[0m" << std::endl;
         return 1;
     }
     int total_points = static_cast<int>(cloud->size());
@@ -507,25 +512,26 @@ int main(int argc, char** argv)
         points_h(3, i) = 1.0;
     }
 
-    // Output arrays
-    std::vector<int> image_ids;
-    std::vector<Eigen::Vector4d> qvecs;
-    std::vector<Eigen::Vector3d> tvecs;
-    std::vector<int> camera_ids;
-    std::vector<std::string> image_names;
-    std::vector<std::vector<Point2DObs>> all_observations;
-
-    // Reusable buffers
-    Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, total_points);
-    std::vector<int> fov_indices;
-    fov_indices.reserve(total_points / 4);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    // Output arrays — pre-sized so each thread writes to its own slot
+    std::vector<int> image_ids(N);
+    std::vector<Eigen::Vector4d> qvecs(N);
+    std::vector<Eigen::Vector3d> tvecs(N);
+    std::vector<int> camera_ids(N, 1);
+    std::vector<std::string> image_names(N);
+    std::vector<std::vector<Point2DObs>> all_observations(N);
 
     std::cout << "Processing images for COLMAP export..." << std::endl;
 
+    #pragma omp parallel for schedule(dynamic)
     for (int img_idx = 0; img_idx < N; img_idx++)
     {
         const auto & pose = image_poses[img_idx];
+
+        // Thread-local buffers
+        Eigen::Matrix<double, 4, Eigen::Dynamic> cam_points(4, total_points);
+        std::vector<int> fov_indices;
+        fov_indices.reserve(total_points / 4);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
 
         // ----------------------------------------------------------------
         // Step 1: Build T_world_cam from pose
@@ -561,12 +567,11 @@ int main(int argc, char** argv)
 
         // ----------------------------------------------------------------
         // Step 4: Transform points to camera frame for FOV/HPR/projection
-        //   (same T_cam_world used for both pose output and projection)
+        //   points_h is read-only — safe to share across threads
         // ----------------------------------------------------------------
         cam_points.noalias() = T_cam_world * points_h;
 
         // FOV + depth filtering
-        fov_indices.clear();
         for (int i = 0; i < total_points; i++)
         {
             double cz = cam_points(2, i);
@@ -579,14 +584,14 @@ int main(int argc, char** argv)
                 fov_indices.push_back(i);
         }
 
+        image_ids[img_idx]   = img_idx + 1;
+        qvecs[img_idx]       = qvec;
+        tvecs[img_idx]       = t_cam_world;
+        image_names[img_idx] = pose.filename;
+
         if (fov_indices.empty())
         {
-            image_ids.push_back(img_idx + 1);
-            qvecs.push_back(qvec);
-            tvecs.push_back(t_cam_world);
-            camera_ids.push_back(1);
-            image_names.push_back(pose.filename);
-            all_observations.push_back({});
+            all_observations[img_idx] = {};
             continue;
         }
 
@@ -626,17 +631,14 @@ int main(int argc, char** argv)
             obs.push_back({u, v, static_cast<int64_t>(orig_idx)});
         }
 
-        image_ids.push_back(img_idx + 1);
-        qvecs.push_back(qvec);
-        tvecs.push_back(t_cam_world);
-        camera_ids.push_back(1);
-        image_names.push_back(pose.filename);
-        all_observations.push_back(std::move(obs));
+        all_observations[img_idx] = std::move(obs);
 
-        std::cout << img_idx << "/" << N - 1
-                  << " — " << pose.filename
-                  << ": " << all_observations.back().size() << " 2D observations"
-                  << std::endl;
+        std::ostringstream msg;
+        msg << img_idx << "/" << N - 1
+            << " — " << pose.filename
+            << ": " << all_observations[img_idx].size() << " 2D observations\n";
+        #pragma omp critical
+        std::cout << msg.str();
     }
 
     write_images_bin(output_dir + "images.bin",
@@ -649,7 +651,9 @@ int main(int argc, char** argv)
     // points3D.bin / points3D.txt
     // ==================================================================
     std::cout << "Writing points3D..." << std::endl;
-    // track[point_id] = list of (image_id, point2d_idx)
+    // A COLMAP "track" records every 2D observation of a 3D point across images:
+    // track[point_id] = list of (image_id, index_into_that_image's_obs_list).
+    // We invert the all_observations table (image → point) into this point → images form.
     std::vector<std::vector<std::pair<int32_t, int32_t>>> tracks(total_points);
 
     for (size_t i = 0; i < all_observations.size(); i++)

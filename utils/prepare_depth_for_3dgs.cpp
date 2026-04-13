@@ -5,29 +5,16 @@
 #include <algorithm>
 #include <filesystem>
 #include <iomanip>
+#include <sstream>
 
+#include <omp.h>
+#include <yaml-cpp/yaml.h>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 // Converts float32 TIFF depth renders (metres, 0 = no data) produced by
 // depth_renderer into 16-bit PNG inverse-depth maps for 3DGS depth
 // regularisation, and writes depth_params.json.
-//
-// Why inverse depth?
-//   camera_utils.py loads the PNG as:  raw = pixel / 65536
-//   cameras.py then applies:           invdepth = raw * scale + offset
-//   The renderer compares invdepth against its own rendered inverse depth.
-//   So the stored value must be inverse depth (1/metres), not direct depth.
-//
-// Encoding: uint16 inverse depth
-//   pixel = round((1 / depth_m) * 65536)   →  range [1, 65535]
-//   pixel = 0                               →  no-data sentinel
-//   scale = 1.0, offset = 0.0              →  invdepth = pixel / 65536
-//   Min representable depth ≈ 1 m (pixel = 65535 → invdepth ≈ 1)
-//   Max representable depth = any (pixel → 0 as depth → ∞)
-//
-// med_scale is NOT written — 3DGS computes and injects it at runtime
-// (dataset_readers.py:166-170) from the median of all per-image scales.
 //
 // Usage:
 //   prepare_depth_for_3dgs <data_folder>
@@ -37,11 +24,6 @@
 //   <data_folder>/distorted/sparse/0/depth_params.json
 
 namespace fs = std::filesystem;
-
-// 3DGS loads depth as:  raw = pixel / 65536   (camera_utils.py)
-// then applies:         invdepth = raw * scale + offset   (cameras.py)
-// We store pixel = 65536 / depth_m, so raw = 1 / depth_m already.
-// scale = 1.0 leaves it unchanged → invdepth = 1 / depth_m  ✓
 static const double SCALE = 1.0;
 
 // Strip file extension from a filename string
@@ -50,6 +32,15 @@ static std::string stem(const std::string & filename)
     auto pos = filename.rfind('.');
     return (pos == std::string::npos) ? filename : filename.substr(0, pos);
 }
+
+struct DepthResult
+{
+    bool        success  = false;
+    std::string out_stem;
+    float       d_min    = 0.0f;
+    float       d_max    = 0.0f;
+    double      coverage = 0.0;
+};
 
 int main(int argc, char ** argv)
 {
@@ -60,13 +51,21 @@ int main(int argc, char ** argv)
     }
 
     fs::path data_folder = argv[1];
-    fs::path depth_dir   = data_folder / "depth_renders";
+
+    std::string depth_dir_name = "depth_renders";
+    try {
+        YAML::Node cfg = YAML::LoadFile((data_folder / "config.cfg").string());
+        if (cfg["depth_dir"])
+            depth_dir_name = cfg["depth_dir"].as<std::string>();
+    } catch (const YAML::Exception &) {}
+
+    fs::path depth_dir   = data_folder / depth_dir_name;
     fs::path out_dir     = data_folder / "distorted/depth";
     fs::path params_path = data_folder / "distorted/sparse/0/depth_params.json";
 
     if (!fs::exists(depth_dir))
     {
-        std::cerr << "Error: depth_renders/ not found in " << data_folder << std::endl;
+        std::cerr << "\033[31m" << "Error: '" << depth_dir << "' not found" << "\033[0m" << std::endl;
         return 1;
     }
 
@@ -78,7 +77,7 @@ int main(int argc, char ** argv)
 
     if (tiff_files.empty())
     {
-        std::cerr << "Error: no .tiff files found in " << depth_dir << std::endl;
+        std::cerr << "\033[31m" << "Error: no .tiff files found in " << depth_dir << "\033[0m" << std::endl;
         return 1;
     }
     std::sort(tiff_files.begin(), tiff_files.end());
@@ -88,24 +87,25 @@ int main(int argc, char ** argv)
     std::ofstream json(params_path);
     if (!json.is_open())
     {
-        std::cerr << "Error: could not open " << params_path << " for writing" << std::endl;
+        std::cerr << "\033[31m" << "Error: could not open " << params_path << " for writing" << "\033[0m" << std::endl;
         return 1;
     }
 
-    int converted = 0;
-    json << "{\n";
+    std::vector<DepthResult> results(tiff_files.size());
 
+    #pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < tiff_files.size(); ++i)
     {
         const fs::path & tiff_path = tiff_files[i];
 
-        // Read float32 depth map (metres, 0 = no data)
         cv::Mat depth_m = cv::imread(tiff_path.string(),
                                      cv::IMREAD_ANYCOLOR | cv::IMREAD_ANYDEPTH);
         if (depth_m.empty())
         {
-            std::cerr << "  Warning: could not read " << tiff_path.filename()
-                      << ", skipping." << std::endl;
+            std::ostringstream msg;
+            msg << "  Warning: could not read " << tiff_path.filename().string() << ", skipping.\n";
+            #pragma omp critical
+            std::cerr << msg.str();
             continue;
         }
 
@@ -127,8 +127,11 @@ int main(int argc, char ** argv)
 
         if (n_valid == 0)
         {
-            std::cerr << "  Warning: " << tiff_path.filename()
-                      << " has no valid depth pixels, skipping." << std::endl;
+            std::ostringstream msg;
+            msg << "  Warning: " << tiff_path.filename().string()
+                << " has no valid depth pixels, skipping.\n";
+            #pragma omp critical
+            std::cerr << msg.str();
             continue;
         }
 
@@ -160,26 +163,38 @@ int main(int argc, char ** argv)
 
         if (!cv::imwrite(out_path.string(), depth_u16))
         {
-            std::cerr << "  Warning: failed to write " << out_path << std::endl;
+            std::ostringstream msg;
+            msg << "  Warning: failed to write " << out_path.string() << "\n";
+            #pragma omp critical
+            std::cerr << msg.str();
             continue;
         }
 
-        // JSON entry: scale = 1/65536 so that (pixel * scale) = invdepth in 1/m
+        results[i] = {true, out_stem, d_min, d_max, coverage};
+    }
+
+    // Sequential pass: write JSON entries in sorted order and print progress
+    int converted = 0;
+    json << "{\n";
+    for (size_t i = 0; i < tiff_files.size(); ++i)
+    {
+        const auto & res = results[i];
+        if (!res.success) continue;
+
         if (converted > 0) json << ",\n";
-        json << "  \"" << out_stem << "\": "
+        json << "  \"" << res.out_stem << "\": "
              << std::fixed << std::setprecision(10)
              << "{\"scale\": " << SCALE << ", \"offset\": 0.0}";
 
-        std::cout << "  " << tiff_path.filename().string()
-                  << "  ->  " << out_stem << ".png"
+        std::cout << "  " << tiff_files[i].filename().string()
+                  << "  ->  " << res.out_stem << ".png"
                   << "  |  coverage " << std::fixed << std::setprecision(1)
-                  << coverage << "%"
-                  << "  |  depth [" << d_min << ", " << d_max << "] m"
+                  << res.coverage << "%"
+                  << "  |  depth [" << res.d_min << ", " << res.d_max << "] m"
                   << std::endl;
 
         converted++;
     }
-
     json << "\n}\n";
     json.close();
 

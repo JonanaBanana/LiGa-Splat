@@ -21,8 +21,12 @@ def generate_launch_description():
     image_prefix       = cfg['image_prefix']
     odom_save_interval = cfg['odom_save_interval']
     frame_id           = cfg['frame_id']
-    leaf_size          = cfg['leaf_size']
-    max_path_length    = cfg['max_path_length']
+    leaf_size             = cfg['leaf_size']
+    max_path_length       = cfg['max_path_length']
+    accumulator_max_points    = cfg['accumulator_max_points']
+    accumulator_publish_interval = cfg['accumulator_publish_interval']
+    global_downsample_interval   = cfg['global_downsample_interval']
+    global_max_points            = cfg['global_max_points']
 
     accumulated_topic = '/airlab_lidar_3dgs/accumulated_point_cloud'
     global_topic      = '/airlab_lidar_3dgs/global_point_cloud'
@@ -31,7 +35,7 @@ def generate_launch_description():
     #Subdirectories
     #Do not change these subdirectories as they are used by the nodes to save data in an organized manner.
     pcd_output_dir = os.path.join(output_dir, 'pcd')
-    image_output_dir = os.path.join(output_dir, 'images')
+    image_output_dir = os.path.join(output_dir, 'distorted/images')
     timestamp_dir = os.path.join(output_dir, 'timestamps')
     
     #Output File Locations
@@ -58,7 +62,10 @@ def generate_launch_description():
                     parameters=[{
                         'input_topic': lidar_topic,
                         'output_topic': accumulated_topic,
-                        'frame_id': frame_id
+                        'frame_id': frame_id,
+                        'max_points': accumulator_max_points,
+                        'publish_interval': accumulator_publish_interval,
+                        'leaf_size': leaf_size
                     }],
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),
@@ -71,7 +78,9 @@ def generate_launch_description():
                         'output_topic': global_topic,
                         'frame_id': frame_id,
                         'leaf_size': leaf_size,
-                        'output_location': pcd_output_location
+                        'output_location': pcd_output_location,
+                        'downsample_interval': global_downsample_interval,
+                        'max_global_points': global_max_points
                     }],
                     extra_arguments=[{'use_intra_process_comms': True}]
                 ),

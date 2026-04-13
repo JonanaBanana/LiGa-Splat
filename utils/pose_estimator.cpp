@@ -15,6 +15,16 @@
 #include <pcl/point_types.h>
 #include <vtkObject.h>
 
+// Interpolates a camera pose for every saved image by matching each image
+// timestamp against the odometry stream.  Position is linearly interpolated;
+// orientation is SLERP'd between the two bracketing odometry samples.
+//
+// A configurable time_delay shifts image timestamps before matching, which
+// compensates for a constant trigger-to-exposure offset between the camera
+// and the odometry sensor.
+//
+// Output: poses.csv  —  one row per image with interpolated px/py/pz/qx/qy/qz/qw
+
 // ========================= Configuration =========================
 struct Config
 {
@@ -23,7 +33,7 @@ struct Config
     // Paths (relative to data_folder)
     std::string poses_file = "poses.csv";
     std::string pose_timestamps_file = "timestamps/odom.csv";
-    std::string image_timestamps_file = "timestamps/images.csv";
+    std::string image_timestamps_file = "timestamps/image.csv";
 };
 
 // ========================= Config Parser =========================
@@ -36,7 +46,8 @@ Config load_config(const std::string & path)
     try {
         node = YAML::LoadFile(path);
     } catch (const YAML::Exception & e) {
-        std::cerr << "Error reading config: " << e.what() << std::endl;
+        std::cerr << "\033[31m" <<"Error reading config: " << e.what() << "\033[0m" <<std::endl;
+        std::cerr << "\033[31m" << "Using default config values." << "\033[0m" << std::endl;
         return cfg;
     }
     cfg.time_delay       = node["time_delay"].as<float>(cfg.time_delay);
@@ -123,7 +134,7 @@ std::vector<Pose> read_odometry_csv(const std::string & path)
     std::ifstream file(path);
     if (!file.is_open())
     {
-        std::cerr << "Error: Could not open odometry file '" << path << "'" << std::endl;
+        std::cerr << "\033[31m" <<"Error: Could not open odometry file '" << path << "'" << "\033[0m" << std::endl;
         return poses;
     }
 
@@ -163,7 +174,7 @@ std::vector<ImageEntry> read_image_csv(const std::string & path)
     std::ifstream file(path);
     if (!file.is_open())
     {
-        std::cerr << "Error: Could not open image timestamp file '" << path << "'" << std::endl;
+        std::cerr << "\033[31m" <<"Error: Could not open image timestamp file '" << path << "'" << "\033[0m" << std::endl;
         return entries;
     }
 
@@ -240,7 +251,7 @@ int main(int argc, char** argv)
     std::ofstream out(output_path);
     if (!out.is_open())
     {
-        std::cerr << "Error: Could not open output file '" << output_path << "'" << std::endl;
+        std::cerr << "\033[31m" <<"Error: Could not open output file '" << output_path << "'" << "\033[0m" << std::endl;
         return 1;
     }
 
@@ -254,7 +265,8 @@ int main(int argc, char** argv)
     for (const auto & img : images)
     {
         
-        // Binary search for the first odom entry with timestamp
+        // lower_bound returns the first odom entry with timestamp >= image_ts.
+        // The two bracketing samples are then [prev(it), it).
         auto it = std::lower_bound(odom.begin(), odom.end(), img.timestamp + time_delay,
             [](const Pose & p, double t) { return p.timestamp < t; });
 
