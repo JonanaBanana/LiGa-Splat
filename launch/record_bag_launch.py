@@ -1,19 +1,24 @@
+from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess
 import os
+import yaml
 from datetime import datetime
 
 def generate_launch_description():
+    pkg_dir = get_package_share_directory('airlab_lidar_3dgs')
+
+    with open(os.path.join(pkg_dir, 'config', 'launch_config.cfg'), 'r') as f:
+        cfg = yaml.safe_load(f)
 
     bag_name = 'isaacsim_bag_' + datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join('/home/airlab/dataset/isaacsim', bag_name)
+    output_dir = os.path.join(cfg['bag_output_dir'], bag_name)
 
     topics = [
         '/isaacsim/camera_info',
-        '/isaacsim/rgb',
-        '/isaacsim/lidar',
-        #'/isaacsim/imu',
-        '/isaacsim/odom',
+        cfg['image_topic'],
+        cfg['lidar_topic'],
+        cfg['odom_topic'],
         '/tf',
     ]
 

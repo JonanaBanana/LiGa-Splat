@@ -232,7 +232,7 @@ void write_points3D_bin(const std::string & path,
         write_bin(f, pt.r);
         write_bin(f, pt.g);
         write_bin(f, pt.b);
-        write_bin(f, 0.1);  // error
+        write_bin(f, 0.1);  // placeholder error value
 
         uint64_t track_length = tracks[i].size();
         if (track_length == 0)
@@ -432,7 +432,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <data_folder> [--diag]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <data_folder>" << std::endl;
         std::cerr << "Output: <data_folder>/distorted/sparse/0/{cameras,images,points3D}.{bin,txt}" << std::endl;
         return 1;
     }
@@ -440,12 +440,6 @@ int main(int argc, char** argv)
     std::string data_folder = argv[1];
     if (data_folder.back() != '/') data_folder += '/';
     std::string config_path = data_folder + "config.cfg";
-
-    bool diagnostics = false;
-    for (int i = 2; i < argc; i++)
-    {
-        if (std::string(argv[i]) == "--diag") diagnostics = true;
-    }
 
     Config cfg = load_config(config_path);
 
@@ -638,56 +632,6 @@ int main(int argc, char** argv)
         camera_ids.push_back(1);
         image_names.push_back(pose.filename);
         all_observations.push_back(std::move(obs));
-
-        // ---- Diagnostic: depth overlay ----
-        if (diagnostics)
-        {
-            const auto & diag_obs = all_observations.back();
-            cv::Mat verify = cv::imread(images_dir + pose.filename);
-            if (!verify.empty() && !diag_obs.empty())
-            {
-                double d_min = std::numeric_limits<double>::max();
-                double d_max = 0.0;
-                for (const auto & o : diag_obs)
-                {
-                    int pid = static_cast<int>(o.point3d_id);
-                    if (pid < 0 || pid >= total_points) continue;
-                    double cz = cam_points(2, pid);
-                    d_min = std::min(d_min, cz);
-                    d_max = std::max(d_max, cz);
-                }
-                double d_range = (d_max - d_min > 1e-6) ? d_max - d_min : 1.0;
-
-                cv::Mat overlay = verify.clone();
-                for (const auto & o : diag_obs)
-                {
-                    int pid = static_cast<int>(o.point3d_id);
-                    if (pid < 0 || pid >= total_points) continue;
-                    int iu = std::clamp(static_cast<int>(o.x), 0, overlay.cols - 1);
-                    int iv = std::clamp(static_cast<int>(o.y), 0, overlay.rows - 1);
-
-                    double cz = cam_points(2, pid);
-                    float t = static_cast<float>((cz - d_min) / d_range);
-
-                    float hue = (1.0f - t) * 270.0f;
-                    float c = 1.0f;
-                    float x = c * (1.0f - std::fabs(std::fmod(hue / 60.0f, 2.0f) - 1.0f));
-                    float rf, gf, bf;
-                    if      (hue < 60)  { rf = c; gf = x; bf = 0; }
-                    else if (hue < 120) { rf = x; gf = c; bf = 0; }
-                    else if (hue < 180) { rf = 0; gf = c; bf = x; }
-                    else if (hue < 240) { rf = 0; gf = x; bf = c; }
-                    else                { rf = x; gf = 0; bf = c; }
-
-                    cv::Scalar color(bf * 255, gf * 255, rf * 255);
-                    cv::circle(overlay, cv::Point(iu, iv), 2, color, -1);
-                }
-
-                std::string diag_dir = data_folder + "diagnostics/colmap_export/";
-                std::filesystem::create_directories(diag_dir);
-                cv::imwrite(diag_dir + pose.filename, overlay);
-            }
-        }
 
         std::cout << img_idx << "/" << N - 1
                   << " — " << pose.filename

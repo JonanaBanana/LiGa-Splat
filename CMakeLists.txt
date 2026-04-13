@@ -196,4 +196,13 @@ target_include_directories(export_colmap PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_IN
 target_link_libraries(export_colmap ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
 install(TARGETS export_colmap DESTINATION lib/${PROJECT_NAME})
 
+add_executable(depth_renderer utils/depth_renderer.cpp)
+target_include_directories(depth_renderer PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(depth_renderer ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp)
+install(TARGETS depth_renderer DESTINATION lib/${PROJECT_NAME})
+
+add_executable(prepare_depth_for_3dgs utils/prepare_depth_for_3dgs.cpp)
+target_link_libraries(prepare_depth_for_3dgs ${OpenCV_LIBS})
+install(TARGETS prepare_depth_for_3dgs DESTINATION lib/${PROJECT_NAME})
+
 ament_package()

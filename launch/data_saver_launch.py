@@ -4,48 +4,47 @@ from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
 from launch_ros.actions import Node
 import os
+import yaml
 
 
 def generate_launch_description():
     pkg_dir = get_package_share_directory('airlab_lidar_3dgs')
-    output_dir = '/home/airlab/dataset/airlab_3dgs/test2'
 
-    """Parameters for the composed nodes"""
-    lidar_topic = '/isaacsim/lidar'
+    with open(os.path.join(pkg_dir, 'config', 'launch_config.cfg'), 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    output_dir         = cfg['output_dir']
+    lidar_topic        = cfg['lidar_topic']
+    odom_topic         = cfg['odom_topic']
+    image_topic        = cfg['image_topic']
+    image_save_interval = cfg['image_save_interval']
+    image_prefix       = cfg['image_prefix']
+    odom_save_interval = cfg['odom_save_interval']
+    frame_id           = cfg['frame_id']
+    leaf_size          = cfg['leaf_size']
+    max_path_length    = cfg['max_path_length']
+
     accumulated_topic = '/airlab_lidar_3dgs/accumulated_point_cloud'
-    global_topic = '/airlab_lidar_3dgs/global_point_cloud'
-    
-    odom_topic = '/isaacsim/odom'
-    path_topic = '/airlab_lidar_3dgs/path'
+    global_topic      = '/airlab_lidar_3dgs/global_point_cloud'
+    path_topic        = '/airlab_lidar_3dgs/path'
 
-    image_topic = '/isaacsim/rgb'
-    image_save_interval = 10
-    image_prefix = 'frame'
-
-    odom_save_interval = 1
-
-    frame_id = 'World'
-
-    leaf_size = 0.03
-
-    max_path_length = 10000
-
-    """Do not change these subdirectories as they are used by the nodes to save data in an organized manner."""
-    """Subdirectories"""
+    #Subdirectories
+    #Do not change these subdirectories as they are used by the nodes to save data in an organized manner.
     pcd_output_dir = os.path.join(output_dir, 'pcd')
     image_output_dir = os.path.join(output_dir, 'images')
     timestamp_dir = os.path.join(output_dir, 'timestamps')
-    """Output File Locations"""
+    
+    #Output File Locations
     pcd_output_location = os.path.join(pcd_output_dir, 'input.pcd')
     image_timestamp_output_location = os.path.join(timestamp_dir, 'image.csv')
     odom_timestamp_output_location = os.path.join(timestamp_dir, 'odom.csv')
 
-    """Create necessary directories if they don't exist."""
+    #Create necessary directories if they don't exist.
     os.makedirs(pcd_output_dir, exist_ok=True)
     os.makedirs(image_output_dir, exist_ok=True)
     os.makedirs(timestamp_dir, exist_ok=True)
 
-    """Generate launch description with multiple components."""
+    #Generate launch description with multiple components.
     container = ComposableNodeContainer(
             name='pointcloud_accumulator_container_mt',
             namespace='',
