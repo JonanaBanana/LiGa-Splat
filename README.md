@@ -235,6 +235,13 @@ When capture is complete, kill the launch (Ctrl-C). The global cloud is saved au
 
 ## Phase 2 — Offline Processing
 
+### QUICK START
+If you want to quickly run all offline postprocessing scripts in one sequence, you can use the shell script `shell_scripts/full_pipeline.sh` which also saves debug images.
+```bash
+/path/to/shell_scripts/full_pipeline.sh <data_folder>
+``` 
+
+### MANUAL PROCESSING
 All utilities are run as:
 
 ```bash
@@ -360,6 +367,7 @@ ros2 run liga_splat pose_viewer <data_folder> [--no-pcd] [--frustum-scale <s>]
 ---
 
 ## Complete example
+Here is a complete example including training with vanilla [3DGS](https://github.com/graphdeco-inria/gaussian-splatting)
 
 ```bash
 # 1. Edit config
