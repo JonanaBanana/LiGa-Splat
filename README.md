@@ -10,10 +10,10 @@
     <td align="center"><em>Depth render</em></td>
   </tr>
 </table>
-<figure align="center">
+<p align="center">
   <img src="image_samples/reconstruction.gif" width="66%"/>
   <br/><em>3DGS reconstruction</em>
-</figure>
+</p>
 
 # LiGa Splat - LiDAR-Informed 3D Gaussian Splatting Pipeline
 A ROS2 pipeline for capturing LiDAR + Odometry + Camera data and converting it into the COLMAP format required to train a [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) model.
