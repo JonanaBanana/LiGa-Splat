@@ -16,5 +16,3 @@ wait
 ros2 run liga_splat export_colmap "$file"
 wait
 ros2 run liga_splat depth_renderer "$file" --diag --dense
-wait
-ros2 run liga_splat prepare_depth_for_3dgs "$file"

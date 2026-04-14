@@ -16,6 +16,7 @@
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/surface/convex_hull.h>
 
 #include <opencv2/imgcodecs.hpp>
@@ -39,18 +40,31 @@ struct Config
     double min_depth = 1.0;
     double max_depth = 400.0;
 
+    // Outlier filtering (applied to raw input cloud before rendering)
+    bool   filter_outliers = true;
+    int    sor_neighbors   = 10;
+    double sor_std_ratio   = 2.0;
+
+    // Background sphere (denser than registration to fill depth in sky/void regions)
+    bool   fill_background      = false;
+    double sphere_radius        = 50.0;
+    int    depth_sphere_num_pts = 500000;
+
     // Hidden point removal
-    double depth_render_hpr_radius = 40000.0;
+    double depth_render_hpr_radius = 40000.0; // intentionally higher than registration to keep more points
+
+    // Dense completion (JBF)
+    float jbf_sigma_c = 15.0f; // colour std-dev (0–255 scale); lower = sharper edges, more unfilled voids
 
     // Camera-to-body transform (T_body_cam)
     bool poses_are_body_frame = true;
     Eigen::Matrix4d trans_mat = Eigen::Matrix4d::Identity();
 
     // Paths (relative to data_folder)
-    std::string downsampled_file = "pcd/downsampled.pcd";
+    std::string pcd_file   = "pcd/input.pcd";
     std::string poses_file = "poses.csv";
     std::string images_dir = "distorted/images";
-    std::string depth_dir = "depth_renders";
+    std::string depth_dir  = "depth_renders";
 };
 
 // ========================= Config Parser =========================
@@ -76,7 +90,16 @@ Config load_config(const std::string & path)
     cfg.min_depth = node["min_depth"].as<double>(cfg.min_depth);
     cfg.max_depth = node["max_depth"].as<double>(cfg.max_depth);
 
+    cfg.filter_outliers      = node["filter_outliers"].as<bool>(cfg.filter_outliers);
+    cfg.sor_neighbors        = node["sor_neighbors"].as<int>(cfg.sor_neighbors);
+    cfg.sor_std_ratio        = node["sor_std_ratio"].as<double>(cfg.sor_std_ratio);
+
+    cfg.fill_background      = node["fill_background"].as<bool>(cfg.fill_background);
+    cfg.sphere_radius        = node["sphere_radius"].as<double>(cfg.sphere_radius);
+    cfg.depth_sphere_num_pts = node["depth_sphere_num_points"].as<int>(cfg.depth_sphere_num_pts);
+
     cfg.depth_render_hpr_radius = node["depth_render_hpr_radius"].as<double>(cfg.depth_render_hpr_radius);
+    cfg.jbf_sigma_c             = node["jbf_sigma_c"].as<float>(cfg.jbf_sigma_c);
     cfg.poses_are_body_frame    = node["poses_are_body_frame"].as<bool>(cfg.poses_are_body_frame);
 
     if (node["trans_mat"])
@@ -90,10 +113,10 @@ Config load_config(const std::string & path)
         cfg.trans_mat << 0,0,1,0, -1,0,0,0, 0,-1,0,0, 0,0,0,1;
     }
 
-    cfg.downsampled_file = node["downsampled_file"].as<std::string>(cfg.downsampled_file);
-    cfg.poses_file       = node["poses_file"].as<std::string>(cfg.poses_file);
-    cfg.images_dir       = node["images_dir"].as<std::string>(cfg.images_dir);
-    cfg.depth_dir        = node["depth_dir"].as<std::string>(cfg.depth_dir);
+    cfg.pcd_file   = node["pcd_file"].as<std::string>(cfg.pcd_file);
+    cfg.poses_file = node["poses_file"].as<std::string>(cfg.poses_file);
+    cfg.images_dir = node["images_dir"].as<std::string>(cfg.images_dir);
+    cfg.depth_dir  = node["depth_dir"].as<std::string>(cfg.depth_dir);
 
     return cfg;
 }
@@ -256,29 +279,16 @@ cv::Mat complete_depth_map_morphological(const cv::Mat & sparse)
 
 // Color-guided joint bilateral sparse depth completion.
 //
-// For every output pixel (y, x) the result is the weighted sum of all *valid*
-// depth pixels within a search window, where the weight combines:
-//
-//   w = exp(-dist²  / 2σ_s²)   ← spatial Gaussian
-//     * exp(-ΔColor²/ 2σ_c²)   ← color  Gaussian (guide image)
-//
-// The JBF reads exclusively from the ORIGINAL SPARSE measurements.
-// Pre-dilating before the filter causes far-depth (e.g. background sphere)
-// values to spread into the source data before the color gate can reject them,
-// which is the primary cause of large halos.  Reading only raw LiDAR pixels
-// means a background point can only contribute if its guide color matches the
-// query pixel — in practice, foreground/background color differences are large
-// enough to suppress it.
 //
 // Any residual unfilled pixels (e.g. sky voids that had no color-compatible
-// LiDAR source) are closed with a small 7×7 post-dilation.  This is safe
-// because the JBF output already respects color edges everywhere it is
-// non-zero, so 3-4px of dilation does not cross object boundaries.
+// LiDAR source) are closed with a small 7×7 post-dilation.
 //
-// Parameters (defaults tuned for outdoor LiDAR at 0.03 m voxel size):
-//   radius  = 4 px   — window half-size; larger → fewer unfilled voids
-//   sigma_s = 3.0f px — spatial roll-off
-//   sigma_c = 3.0f    — color roll-off (0–255 scale); lower = sharper edges
+// Parameters:
+//   radius  = 4 px    — window half-size; larger → fewer voids, slower, more bleed risk
+//   sigma_s = 3.0 px  — spatial roll-off; well matched to radius=4 (edge weight ≈ 0.4)
+//   sigma_c           — colour std-dev (0–255 scale); lower = sharper edges / more voids
+//                       configurable via jbf_sigma_c in config.cfg (default 15)
+
 cv::Mat complete_depth_map_guided(const cv::Mat & sparse,
                                    const cv::Mat & guide_bgr,
                                    int   radius  = 4,
@@ -394,6 +404,9 @@ int main(int argc, char** argv)
     fs::path params_path = fs::path(data_folder) / "distorted/sparse/0/depth_params.json";
 
     std::cout << "=== Depth Renderer ===" << std::endl;
+    std::cout << "  Input cloud:           " << cfg.pcd_file << std::endl;
+    std::cout << "  Outlier removal:       " << (cfg.filter_outliers ? "yes" : "no") << std::endl;
+    std::cout << "  Background sphere:     " << (cfg.fill_background ? std::to_string(cfg.depth_sphere_num_pts) + " pts, r=" + std::to_string((int)cfg.sphere_radius) + "m" : "no") << std::endl;
     std::cout << "  Resolution:            " << cfg.img_w << "x" << cfg.img_h << std::endl;
     std::cout << "  Focal length:          " << cfg.f << std::endl;
     std::cout << "  Depth range:          [" << cfg.min_depth << ", " << cfg.max_depth << "] m" << std::endl;
@@ -406,27 +419,70 @@ int main(int argc, char** argv)
     std::cout << "  depth_params.json:     " << params_path.string() << std::endl;
     std::cout << "======================" << std::endl;
 
-    // ---- Load point cloud ----
+    // ---- Load and filter point cloud ----
     auto t_start = std::chrono::high_resolution_clock::now();
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
-    if (pcl::io::loadPCDFile<pcl::PointXYZ>(data_folder + cfg.downsampled_file, *cloud) == -1)
+    if (pcl::io::loadPCDFile<pcl::PointXYZ>(data_folder + cfg.pcd_file, *cloud) == -1)
     {
         std::cerr << "\033[31m" << "Error: Could not load PCD file '"
-                  << data_folder + cfg.downsampled_file << "'" << "\033[0m" << std::endl;
+                  << data_folder + cfg.pcd_file << "'" << "\033[0m" << std::endl;
         return 1;
     }
-    std::cout << "Loaded " << cloud->size() << " points" << std::endl;
+    std::cout << "Loaded " << cloud->size() << " points from " << cfg.pcd_file << std::endl;
 
-    int num_points = static_cast<int>(cloud->size());
+    if (cfg.filter_outliers)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr clean(new pcl::PointCloud<pcl::PointXYZ>());
+        for (const auto & pt : cloud->points)
+            if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
+                clean->push_back(pt);
+
+        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+        sor.setInputCloud(clean);
+        sor.setMeanK(cfg.sor_neighbors);
+        sor.setStddevMulThresh(cfg.sor_std_ratio);
+        sor.filter(*cloud);
+        std::cout << "After outlier removal: " << cloud->size() << " points" << std::endl;
+    }
+
+    int num_cloud  = static_cast<int>(cloud->size());
+    int num_sphere = cfg.fill_background ? cfg.depth_sphere_num_pts : 0;
+    int num_points = num_cloud + num_sphere;
 
     Eigen::Matrix<double, 4, Eigen::Dynamic> points_h(4, num_points);
-    for (int i = 0; i < num_points; i++)
+    for (int i = 0; i < num_cloud; i++)
     {
         points_h(0, i) = cloud->points[i].x;
         points_h(1, i) = cloud->points[i].y;
         points_h(2, i) = cloud->points[i].z;
         points_h(3, i) = 1.0;
+    }
+
+    if (cfg.fill_background)
+    {
+        // Compute centroid from cloud points
+        Eigen::Vector3d centroid(0.0, 0.0, 0.0);
+        for (int i = 0; i < num_cloud; i++)
+            centroid += points_h.col(i).head<3>();
+        centroid /= num_cloud;
+
+        std::cout << "Adding " << num_sphere << " background sphere points (r="
+                  << cfg.sphere_radius << "m) around ["
+                  << centroid.transpose() << "]" << std::endl;
+
+        // Fibonacci sphere (uniform distribution)
+        for (int i = 0; i < num_sphere; i++)
+        {
+            double idx   = static_cast<double>(i) + 0.5;
+            double phi   = std::acos(1.0 - 2.0 * idx / num_sphere);
+            double theta = M_PI * (1.0 + std::sqrt(5.0)) * idx;
+            int col = num_cloud + i;
+            points_h(0, col) = std::cos(theta) * std::sin(phi) * cfg.sphere_radius + centroid(0);
+            points_h(1, col) = std::sin(theta) * std::sin(phi) * cfg.sphere_radius + centroid(1);
+            points_h(2, col) = std::cos(phi)                   * cfg.sphere_radius + centroid(2);
+            points_h(3, col) = 1.0;
+        }
     }
 
     auto image_poses = read_image_poses(data_folder + cfg.poses_file);
@@ -564,9 +620,10 @@ int main(int argc, char** argv)
             float depth = static_cast<float>(cz);
             float & pixel = depth_map.at<float>(iv, iu);
             if (pixel == 0.0f || depth < pixel)
+            {
                 pixel = depth;
-
-            projected++;
+                projected++;
+            }
         }
 
         // Optional dense completion (colour-guided joint bilateral)
@@ -575,7 +632,7 @@ int main(int argc, char** argv)
             cv::Mat guide = cv::imread(images_dir + pose.filename, cv::IMREAD_COLOR);
             if (!guide.empty())
             {
-                depth_map = complete_depth_map_guided(depth_map, guide);
+                depth_map = complete_depth_map_guided(depth_map, guide, 4, 3.0f, cfg.jbf_sigma_c);
             }
             else
             {
@@ -710,7 +767,7 @@ int main(int argc, char** argv)
               << "      -s " << data_folder << "distorted \\\n"
               << "      -d " << png_dir.string() << " \\\n"
               << "      --depth_params " << params_path.string() << " \\\n"
-              << "      <other args>" << std::endl;
+              << "      --eval --densify_until_iter 10000 --opacity_reset_interval 11000 <other args>" << std::endl;
 
     return 0;
 }

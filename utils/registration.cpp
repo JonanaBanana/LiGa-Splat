@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <filesystem>
 #include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <yaml-cpp/yaml.h>
 
@@ -44,7 +46,15 @@ struct Config
     double sor_std_ratio = 2.0;
 
     // Hidden point removal
-    double hpr_radius = 100000.0;
+    // Empirically good range: 15000–30000 for outdoor scenes with max_depth ~200 m.
+    double hpr_radius = 20000.0;
+
+    // Edge point preservation
+    bool preserve_edge_points = true;
+    double edge_canny_low    = 50.0;
+    double edge_canny_high   = 150.0;
+    int    edge_dilation_px  = 2;     // dilate edge mask by N pixels before matching
+    double edge_voxel_size   = 0.01;  // dedup resolution for edge points (metres); keep small
 
     // Background sphere
     bool fill_background = true;
@@ -95,6 +105,12 @@ Config load_config(const std::string & path)
 
     cfg.hpr_radius = node["hpr_radius"].as<double>(cfg.hpr_radius);
 
+    cfg.preserve_edge_points = node["preserve_edge_points"].as<bool>(cfg.preserve_edge_points);
+    cfg.edge_canny_low       = node["edge_canny_low"].as<double>(cfg.edge_canny_low);
+    cfg.edge_canny_high      = node["edge_canny_high"].as<double>(cfg.edge_canny_high);
+    cfg.edge_dilation_px     = node["edge_dilation_px"].as<int>(cfg.edge_dilation_px);
+    cfg.edge_voxel_size      = node["edge_voxel_size"].as<double>(cfg.edge_voxel_size);
+
     cfg.fill_background       = node["fill_background"].as<bool>(cfg.fill_background);
     cfg.sphere_radius         = node["sphere_radius"].as<double>(cfg.sphere_radius);
     cfg.sphere_num_pts        = node["sphere_num_points"].as<int>(cfg.sphere_num_pts);
@@ -130,6 +146,12 @@ void print_config(const Config & cfg)
     std::cout << "  Depth range:     [" << cfg.min_depth << ", " << cfg.max_depth << "]" << std::endl;
     std::cout << "  Filter outliers: " << (cfg.filter_outliers ? "yes" : "no") << std::endl;
     std::cout << "  HPR radius:      " << cfg.hpr_radius << std::endl;
+    std::cout << "  Preserve edges:  " << (cfg.preserve_edge_points ? "yes" : "no");
+    if (cfg.preserve_edge_points)
+        std::cout << "  (Canny [" << cfg.edge_canny_low << ", " << cfg.edge_canny_high
+                  << "], dilation=" << cfg.edge_dilation_px << "px"
+                  << ", edge voxel=" << cfg.edge_voxel_size << "m)";
+    std::cout << std::endl;
     std::cout << "  Background:      " << (cfg.fill_background ? "yes" : "no") << std::endl;
     std::cout << "  PCD file:        " << cfg.pcd_file << std::endl;
     std::cout << "  Poses file:      " << cfg.poses_file << std::endl;
@@ -337,6 +359,11 @@ int main(int argc, char** argv)
     }
     std::cout << "Loaded " << cloud->size() << " points from " << pcd_path << std::endl;
 
+    // full_cloud holds the post-SOR, pre-voxel cloud so we can recover edge points
+    // that were discarded by downsampling.  Only populated when preserve_edge_points
+    // is true and filter_outliers is true (i.e. voxel downsampling actually ran).
+    pcl::PointCloud<pcl::PointXYZ>::Ptr full_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+
     if (cfg.filter_outliers)
     {
         pcl::PointCloud<pcl::PointXYZ>::Ptr clean(new pcl::PointCloud<pcl::PointXYZ>());
@@ -352,6 +379,9 @@ int main(int argc, char** argv)
         sor.setStddevMulThresh(cfg.sor_std_ratio);
         sor.filter(*clean);
         std::cout << "After outlier removal: " << clean->size() << " points" << std::endl;
+
+        if (cfg.preserve_edge_points)
+            *full_cloud = *clean; // snapshot before voxel grid removes points
 
         pcl::VoxelGrid<pcl::PointXYZ> vg;
         vg.setInputCloud(clean);
@@ -405,19 +435,6 @@ int main(int argc, char** argv)
         }
     }
 
-    // Save as binary PCD
-    pcl::PointCloud<pcl::PointXYZ> save_cloud;
-    save_cloud.resize(total_points);
-    for (int i = 0; i < total_points; i++)
-    {
-        save_cloud[i].x = points_h(0, i);
-        save_cloud[i].y = points_h(1, i);
-        save_cloud[i].z = points_h(2, i);
-    }
-    pcl::io::savePCDFileBinary(downsampled_path, save_cloud);
-    
-    std::cout << "Saved downsampled point cloud to " << downsampled_path << std::endl;
-
     auto image_poses = read_image_poses(poses_path);
     if (image_poses.empty())
     {
@@ -426,9 +443,182 @@ int main(int argc, char** argv)
     }
     std::cout << "Loaded " << image_poses.size() << " image poses" << std::endl;
 
-    // ---- Process each image ----
-    // Use per-image storage so threads never contend on a shared container.
-    // Observations are merged into all_observations after the parallel loop.
+    // =========================================================
+    // Pass 1: Edge detection — collect full_cloud indices only.
+    // No colour sampling here; edge points will receive colour
+    // via the regular registration pass after they are added
+    // to the cloud, giving them stable multi-view median colour.
+    // =========================================================
+
+    // per_image_edge_indices[i] = full_cloud indices visible on edge pixels in image i
+    std::vector<std::vector<int>> per_image_edge_indices(image_poses.size());
+    // per_image_edge_diag[i]    = projected pixel coords (for diagnostics only)
+    std::vector<std::vector<ProjPoint>> per_image_edge_diag(image_poses.size());
+
+    if (cfg.preserve_edge_points && !full_cloud->empty())
+    {
+        #pragma omp parallel for schedule(dynamic)
+        for (size_t img_idx = 0; img_idx < image_poses.size(); img_idx++)
+        {
+            const auto & pose = image_poses[img_idx];
+
+            std::string img_file = images_dir + pose.filename;
+            cv::Mat img = cv::imread(img_file, cv::IMREAD_GRAYSCALE);
+            if (img.empty()) continue;
+
+            Eigen::Matrix4d T_world_body = quat_to_matrix(
+                pose.px, pose.py, pose.pz,
+                pose.qx, pose.qy, pose.qz, pose.qw);
+            Eigen::Matrix4d T_cam_world = (cfg.poses_are_body_frame
+                                          ? T_world_body * cfg.trans_mat
+                                          : T_world_body).inverse();
+
+            // Canny + dilation
+            cv::Mat edge_mask;
+            cv::Canny(img, edge_mask, cfg.edge_canny_low, cfg.edge_canny_high);
+            if (cfg.edge_dilation_px > 0)
+            {
+                int ks = 2 * cfg.edge_dilation_px + 1;
+                cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, {ks, ks});
+                cv::dilate(edge_mask, edge_mask, kernel);
+            }
+
+            if (diagnostics)
+            {
+                std::string diag_dir = data_folder + "diagnostics/edge_detection/";
+                std::filesystem::create_directories(diag_dir);
+                cv::imwrite(diag_dir + pose.filename, edge_mask);
+            }
+
+            // FOV-filter full_cloud in camera space
+            int num_full = static_cast<int>(full_cloud->size());
+            std::vector<int> full_fov_indices;
+            full_fov_indices.reserve(num_full / 4);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr full_fov_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+            full_fov_cloud->reserve(num_full / 4);
+
+            for (int i = 0; i < num_full; i++)
+            {
+                const auto & pt = full_cloud->points[i];
+                double cx = T_cam_world(0,0)*pt.x + T_cam_world(0,1)*pt.y + T_cam_world(0,2)*pt.z + T_cam_world(0,3);
+                double cy = T_cam_world(1,0)*pt.x + T_cam_world(1,1)*pt.y + T_cam_world(1,2)*pt.z + T_cam_world(1,3);
+                double cz = T_cam_world(2,0)*pt.x + T_cam_world(2,1)*pt.y + T_cam_world(2,2)*pt.z + T_cam_world(2,3);
+
+                if (cz < cfg.min_depth || cz > cfg.max_depth) continue;
+                if (std::abs(cx) >= cz * tan_half_fov_x || std::abs(cy) >= cz * tan_half_fov_y) continue;
+
+                full_fov_indices.push_back(i);
+                full_fov_cloud->push_back({static_cast<float>(cx),
+                                           static_cast<float>(cy),
+                                           static_cast<float>(cz)});
+            }
+
+            if (full_fov_indices.empty()) continue;
+
+            // HPR — mirrors colour registration to avoid adding occluded points
+            Eigen::Vector3d edge_origin(0.0, 0.0, 0.0);
+            std::vector<int> full_hpr = hidden_point_removal(
+                full_fov_cloud, edge_origin, cfg.hpr_radius);
+
+            // Project surviving points; record those on edge pixels
+            for (int hi : full_hpr)
+            {
+                if (hi < 0 || hi >= static_cast<int>(full_fov_indices.size())) continue;
+                int orig_i = full_fov_indices[hi];
+
+                const auto & cp = full_fov_cloud->points[hi];
+                double cz = cp.z, cx = cp.x, cy = cp.y;
+
+                double u = cfg.f * cx / cz + cfg.px;
+                double v = cfg.f * cy / cz + cfg.py;
+                if (u < margin_x || u >= max_proj_x || v < margin_y || v >= max_proj_y) continue;
+
+                int iu = std::clamp(static_cast<int>(std::round(u)), 0, cfg.img_w - 1);
+                int iv = std::clamp(static_cast<int>(std::round(v)), 0, cfg.img_h - 1);
+                if (edge_mask.at<uint8_t>(iv, iu) == 0) continue;
+
+                per_image_edge_indices[img_idx].push_back(orig_i);
+                if (diagnostics)
+                    per_image_edge_diag[img_idx].push_back({iu, iv, static_cast<float>(cz)});
+            }
+
+        } // end Pass 1 parallel loop
+    }
+
+    // =========================================================
+    // Between passes: deduplicate edge candidates and expand
+    // points_h so Pass 2 colour-registers the new points too.
+    // =========================================================
+    {
+        const double inv_vs = 1.0 / cfg.edge_voxel_size;
+        auto make_key = [&](double x, double y, double z) -> int64_t {
+            int64_t ix = static_cast<int64_t>(std::floor(x * inv_vs));
+            int64_t iy = static_cast<int64_t>(std::floor(y * inv_vs));
+            int64_t iz = static_cast<int64_t>(std::floor(z * inv_vs));
+            return (ix & 0x1FFFFFLL) | ((iy & 0x1FFFFFLL) << 21) | ((iz & 0x1FFFFFLL) << 42);
+        };
+
+        // Collect unique full_cloud indices across all images
+        std::unordered_set<int> seen_fc_idx;
+        std::vector<int> unique_fc_indices;
+        for (const auto & idx_vec : per_image_edge_indices)
+            for (int fc_idx : idx_vec)
+                if (seen_fc_idx.insert(fc_idx).second)
+                    unique_fc_indices.push_back(fc_idx);
+
+        // Deduplicate by edge_voxel_size grid (one edge point per voxel)
+        std::unordered_set<int64_t> occupied;
+        std::vector<pcl::PointXYZ> new_pts;
+        for (int fc_idx : unique_fc_indices)
+        {
+            const auto & pt = full_cloud->points[fc_idx];
+            int64_t key = make_key(pt.x, pt.y, pt.z);
+            if (!occupied.insert(key).second) continue;
+            new_pts.push_back(pt);
+        }
+
+        if (!new_pts.empty())
+        {
+            // Expand points_h to accommodate new edge points
+            int old_total = total_points;
+            int extra = static_cast<int>(new_pts.size());
+            Eigen::Matrix<double, 4, Eigen::Dynamic> expanded(4, old_total + extra);
+            expanded.leftCols(old_total) = points_h;
+            for (int i = 0; i < extra; i++)
+            {
+                expanded(0, old_total + i) = new_pts[i].x;
+                expanded(1, old_total + i) = new_pts[i].y;
+                expanded(2, old_total + i) = new_pts[i].z;
+                expanded(3, old_total + i) = 1.0;
+            }
+            points_h = std::move(expanded);
+            total_points += extra;
+
+            std::cout << "Edge preservation: added " << extra
+                      << " points → total " << total_points << std::endl;
+        }
+    }
+
+    // Save downsampled.pcd (includes edge points)
+    {
+        pcl::PointCloud<pcl::PointXYZ> save_cloud;
+        save_cloud.resize(total_points);
+        for (int i = 0; i < total_points; i++)
+        {
+            save_cloud[i].x = static_cast<float>(points_h(0, i));
+            save_cloud[i].y = static_cast<float>(points_h(1, i));
+            save_cloud[i].z = static_cast<float>(points_h(2, i));
+        }
+        pcl::io::savePCDFileBinary(downsampled_path, save_cloud);
+        std::cout << "Saved downsampled point cloud (" << total_points
+                  << " points) to " << downsampled_path << std::endl;
+    }
+
+    // =========================================================
+    // Pass 2: Colour registration on the full expanded cloud.
+    // Edge points are treated identically to downsampled points;
+    // they receive stable multi-view median colour.
+    // =========================================================
     std::vector<std::vector<ColorObservation>> per_image_obs(image_poses.size());
 
     #pragma omp parallel for schedule(dynamic)
@@ -555,13 +745,12 @@ int main(int argc, char** argv)
 
             found++;
         }
-        // ---- Diagnostic: depth overlay ----
+        // ---- Diagnostic: registered_points overlay (regular + edge points) ----
         if (diagnostics && !diag_points.empty())
         {
             cv::Mat verify = cv::imread(images_dir + pose.filename);
             if (!verify.empty())
             {
-                // Find depth range
                 double d_min = std::numeric_limits<double>::max();
                 double d_max = 0.0;
                 for (const auto & dp : diag_points)
@@ -584,12 +773,21 @@ int main(int argc, char** argv)
                     else if (hue < 180) { rf = 0; gf = c; bf = x; }
                     else if (hue < 240) { rf = 0; gf = x; bf = c; }
                     else                { rf = x; gf = 0; bf = c; }
-
-                    cv::Scalar color(bf * 255, gf * 255, rf * 255);
-                    cv::circle(overlay, cv::Point(dp.iu, dp.iv), 2, color, -1);
+                    cv::circle(overlay, cv::Point(dp.iu, dp.iv), 2,
+                               cv::Scalar(bf * 255, gf * 255, rf * 255), -1);
                 }
 
-                std::string diag_dir = data_folder + "diagnostics/color_registration/";
+                // Edge points as semi-transparent green dots on top
+                if (!per_image_edge_diag[img_idx].empty())
+                {
+                    cv::Mat edge_layer = overlay.clone();
+                    for (const auto & dp : per_image_edge_diag[img_idx])
+                        cv::circle(edge_layer, cv::Point(dp.iu, dp.iv), 1,
+                                   cv::Scalar(0, 255, 0), -1);
+                    cv::addWeighted(edge_layer, 0.6, overlay, 0.4, 0, overlay);
+                }
+
+                std::string diag_dir = data_folder + "diagnostics/registered_points/";
                 std::filesystem::create_directories(diag_dir);
                 cv::imwrite(diag_dir + pose.filename, overlay);
             }
@@ -608,6 +806,8 @@ int main(int argc, char** argv)
     }
 
     // ---- Merge per-image observations into a single list ----
+    // Edge points were added to points_h before Pass 2, so they are already
+    // covered by per_image_obs — no separate edge colour list needed.
     std::vector<ColorObservation> all_observations;
     all_observations.reserve(total_points * 2);
     for (const auto & obs_vec : per_image_obs)

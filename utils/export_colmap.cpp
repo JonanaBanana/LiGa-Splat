@@ -350,10 +350,7 @@ Eigen::Matrix4d quat_to_matrix(double px, double py, double pz,
 // the 4×4 symmetric traceless matrix K (Bar-Itzhack, 2000).  The quaternion
 // is the eigenvector of K corresponding to its largest eigenvalue.
 // Matches Python's rotmat2qvec exactly (COLMAP read_write_model.py)
-// Python unpacks R.flat (row-major) as: Rxx=R[0,0], Ryx=R[0,1], Rzx=R[0,2],
-//   Rxy=R[1,0], Ryy=R[1,1], Rzy=R[1,2], Rxz=R[2,0], Ryz=R[2,1], Rzz=R[2,2]
-// Bottom row: K[3][:3] = {Ryz-Rzy, Rzx-Rxz, Rxy-Ryx}
-//           = {R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]}
+
 Eigen::Vector4d rotmat_to_qvec(const Eigen::Matrix3d & R)
 {
     Eigen::Matrix4d K;
@@ -533,11 +530,6 @@ int main(int argc, char** argv)
         fov_indices.reserve(total_points / 4);
         pcl::PointCloud<pcl::PointXYZ>::Ptr visible_cloud(new pcl::PointCloud<pcl::PointXYZ>());
 
-        // ----------------------------------------------------------------
-        // Step 1: Build T_world_cam from pose
-        //   - If poses are body-frame: T_world_cam = T_world_body * trans_mat
-        //   - If poses are camera-frame: T_world_cam = T_world_pose (as-is)
-        // ----------------------------------------------------------------
         Eigen::Matrix4d T_pose = quat_to_matrix(
             pose.px, pose.py, pose.pz,
             pose.qx, pose.qy, pose.qz, pose.qw);
@@ -548,27 +540,11 @@ int main(int argc, char** argv)
         else
             T_world_cam = T_pose;
 
-        // ----------------------------------------------------------------
-        // Step 2: Compute T_cam_world = inv(T_world_cam)
-        //   This is what COLMAP stores: "projection from world to camera"
-        //   Matches Python: q_transform = np.linalg.inv(transform[i] @ trans_mat)
-        // ----------------------------------------------------------------
         Eigen::Matrix4d T_cam_world = T_world_cam.inverse();
-
-        // ----------------------------------------------------------------
-        // Step 3: Extract COLMAP qvec and tvec from T_cam_world
-        //   qvec = rotmat2qvec(T_cam_world[:3,:3])
-        //   tvec = T_cam_world[:3, 3]
-        //   Camera center can be recovered as: C = -R^T * t
-        // ----------------------------------------------------------------
         Eigen::Matrix3d R_cam_world = T_cam_world.block<3, 3>(0, 0);
         Eigen::Vector3d t_cam_world = T_cam_world.block<3, 1>(0, 3);
         Eigen::Vector4d qvec = rotmat_to_qvec(R_cam_world);
 
-        // ----------------------------------------------------------------
-        // Step 4: Transform points to camera frame for FOV/HPR/projection
-        //   points_h is read-only — safe to share across threads
-        // ----------------------------------------------------------------
         cam_points.noalias() = T_cam_world * points_h;
 
         // FOV + depth filtering
@@ -651,9 +627,6 @@ int main(int argc, char** argv)
     // points3D.bin / points3D.txt
     // ==================================================================
     std::cout << "Writing points3D..." << std::endl;
-    // A COLMAP "track" records every 2D observation of a 3D point across images:
-    // track[point_id] = list of (image_id, index_into_that_image's_obs_list).
-    // We invert the all_observations table (image → point) into this point → images form.
     std::vector<std::vector<std::pair<int32_t, int32_t>>> tracks(total_points);
 
     for (size_t i = 0; i < all_observations.size(); i++)

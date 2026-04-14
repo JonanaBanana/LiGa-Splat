@@ -10,7 +10,7 @@ import yaml
 def generate_launch_description():
     pkg_dir = get_package_share_directory('liga_splat')
 
-    with open(os.path.join(pkg_dir, 'config', 'launch_config_test.cfg'), 'r') as f:
+    with open(os.path.join(pkg_dir, 'config', 'launch_config.cfg'), 'r') as f:
         cfg = yaml.safe_load(f)
 
     output_dir         = cfg['output_dir']

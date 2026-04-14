@@ -143,10 +143,10 @@ This file lives inside each **data folder** (i.e. `<output_dir>/config.cfg`). It
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `voxel_size` | `0.05` | Voxel grid leaf size in metres used to downsample `pcd/input.pcd` before colour registration |
+| `voxel_size` | `0.1` | Voxel grid leaf size in metres used to downsample `pcd/input.pcd` before colour registration |
 | `min_depth` | `1.0` | Minimum camera-frame depth (metres) for a point to be projected onto an image |
 | `max_depth` | `200.0` | Maximum camera-frame depth (metres); points beyond this are ignored |
-| `filter_outliers` | `true` | Apply Statistical Outlier Removal (SOR) before voxel downsampling |
+| `filter_outliers` | `true` | Apply Statistical Outlier Removal (SOR) before voxel downsampling. Also applied by `depth_renderer` before rendering. |
 | `sor_neighbors` | `10` | Number of nearest neighbours used by the SOR filter |
 | `sor_std_ratio` | `2.0` | Standard-deviation multiplier threshold for SOR; points further than `sor_std_ratio × σ` from the mean neighbour distance are removed |
 
@@ -154,16 +154,33 @@ This file lives inside each **data folder** (i.e. `<output_dir>/config.cfg`). It
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `hpr_radius` | `25000.0` | Radius parameter for the Hidden Point Removal (HPR) algorithm used during colour registration. Smaller values are more aggressive at removing occluded points. |
-| `depth_render_hpr_radius` | `40000.0` | HPR radius used specifically by the `depth_renderer` utility. Can be tuned independently of `hpr_radius`. |
+| `hpr_radius` | `20000.0` | Radius parameter for the Hidden Point Removal (HPR) convex-hull algorithm used during colour registration. The empirically good range for outdoor scenes is **15000–30000**: too small makes the convex hull numerically unstable; too large causes all flipped points to cluster at the same distance so depth discrimination is lost and occluded points bleed through. Scale with `max_depth` if you change it. |
+| `depth_render_hpr_radius` | `40000.0` | HPR radius used by the `depth_renderer` utility. Intentionally higher than `hpr_radius` to keep more points in the depth map (denser coverage). |
+
+#### Edge point preservation
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `preserve_edge_points` | `true` | Detects Canny edges in each image, links them to 3D points from the pre-downsample cloud (via HPR), re-adds those points after voxel downsampling, then colour-registers the combined cloud. Prevents voxel downsampling from erasing high-frequency geometric detail at object boundaries. |
+| `edge_canny_low` | `50.0` | Lower Canny hysteresis threshold. Decrease to detect more (weaker) edges. |
+| `edge_canny_high` | `150.0` | Upper Canny hysteresis threshold. Decrease to detect more (weaker) edges. |
+| `edge_dilation_px` | `2` | Dilate the edge mask by N pixels before matching 3D points. Widens the capture zone around each detected edge. |
+| `edge_voxel_size` | `0.02` | Deduplication grid size for edge points in metres. Keep well below `voxel_size` so edges are preserved at finer resolution than the main cloud. |
 
 #### Background sphere
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `fill_background` | `false` | When `true`, a uniformly-sampled sphere of points is added around the scene centroid before registration. Useful for sparse scenes where the 3DGS optimiser would otherwise place large "background blobs" at arbitrary distances. |
-| `sphere_radius` | `50.0` | Radius of the background sphere in metres |
-| `sphere_num_points` | `50000` | Number of points uniformly sampled on the background sphere |
+| `fill_background` | `true` | When `true`, a uniformly-sampled sphere of points is added around the scene centroid. Used by both `registration` (via `sphere_num_points`) and `depth_renderer` (via `depth_sphere_num_points`) — each with its own density. Useful for sparse scenes where the 3DGS optimiser would otherwise place large "background blobs" at arbitrary distances. |
+| `sphere_radius` | `50.0` | Radius of the background sphere in metres (shared by registration and depth renderer) |
+| `sphere_num_points` | `50000` | Number of sphere points added during colour registration |
+| `depth_sphere_num_points` | `500000` | Number of sphere points added by `depth_renderer`. Much denser than for registration so that sky and void regions have depth coverage in every rendered depth map. |
+
+#### Dense depth completion
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `jbf_sigma_c` | `15.0` | Colour standard deviation (0–255 scale) for the colour-guided joint bilateral filter used by `depth_renderer --dense`. Lower values produce sharper depth edges but leave more unfilled voids in textureless or sky regions. Increase toward 30–50 if the dense map has too many holes; decrease if depth bleeds across colour boundaries. |
 
 #### Camera–body transform
 
@@ -187,7 +204,7 @@ These rarely need to change unless you have reorganised the folder layout.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `pcd_file` | `pcd/input.pcd` | Raw captured point cloud written by Phase 1 |
-| `downsampled_file` | `pcd/downsampled.pcd` | Filtered + optionally sphere-padded cloud written by `registration` |
+| `downsampled_file` | `pcd/downsampled.pcd` | Voxel-downsampled + edge-preserved + optionally sphere-padded cloud written by `registration` |
 | `reconstructed_file` | `pcd/reconstructed.pcd` | Coloured point cloud written by `reconstruction` |
 | `poses_file` | `poses.csv` | Interpolated camera poses written by `pose_estimator` |
 | `registration_file` | `color_registration.csv` | Per-point colour observations written by `registration` |
@@ -287,7 +304,7 @@ ros2 run liga_splat pose_estimator <data_folder>
 
 ### 2. registration
 
-Projects the point cloud into each camera image to assign an RGB colour to every visible point. Outputs both a downsampled point cloud (with an optional background sphere added) and a per-point colour observation table.
+Projects the point cloud into each camera image to assign an RGB colour to every visible point. Runs in two passes: first detects edge pixels and links them to pre-downsample 3D points, then colour-registers the combined (downsampled + edge-preserved) cloud so all points receive stable multi-view median colours.
 
 ```bash
 ros2 run liga_splat registration <data_folder> [--diag]
@@ -295,7 +312,7 @@ ros2 run liga_splat registration <data_folder> [--diag]
 
 | Option | Description |
 |--------|-------------|
-| `--diag` | Save false-colour depth overlay images to `diagnostics/color_registration/` |
+| `--diag` | Save diagnostic images to `diagnostics/`: Canny edge masks in `edge_detection/` and a combined overlay (depth-coloured registered points + semi-transparent green edge points) in `registered_points/` |
 
 **Output:**
 - `pcd/downsampled.pcd` — geometry used for all downstream steps
@@ -329,7 +346,7 @@ ros2 run liga_splat export_colmap <data_folder>
 
 ### 5. depth_renderer
 
-Renders a depth map for each camera pose using the downsampled point cloud, then immediately converts the result to 16-bit PNG inverse-depth maps and writes `depth_params.json` — the exact format expected by the depth-regularised 3DGS training script. Supports optional hidden-point removal and colour-guided dense completion.
+Renders a depth map for each camera pose using the raw input point cloud (`pcd/input.pcd`). Applies SOR outlier removal and adds a dense background sphere (controlled by `depth_sphere_num_points`) before rendering, giving more complete depth coverage than the downsampled cloud. Converts results to 16-bit PNG inverse-depth maps and writes `depth_params.json` — the exact format expected by the depth-regularised 3DGS training script. Supports optional hidden-point removal and colour-guided dense completion.
 
 ```bash
 ros2 run liga_splat depth_renderer <data_folder> [--no-hpr] [--dense] [--diag] [--save-tiff]
