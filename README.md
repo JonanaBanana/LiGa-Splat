@@ -31,8 +31,18 @@ cd ~/ros2_ws
 colcon build --packages-select liga_splat
 source install/setup.bash
 ```
+
 Again, skip this part if you do not want to use ROS2.
 ---
+
+## Test (No ROS2)
+To quickly test if you installation works, you can try to run the full phase 2 pipeline (see phase 2 below). Simply extract the example_dataset.tar.xz file and run the full_pipeline.sh file with the dataset_path as argument.
+```bash
+cd ~/ros2_ws/src/liga_splat
+tar -xvf example_dataset.tar.xz
+./shell_scripts/full_pipeline.sh example_dataset/
+```
+If everything successfully runs, your installation works, and you can even directly train a 3DGS reconstruction on the results using any 3DGS reconstructor, since the structure is mostly identical to a COLMAP output.
 
 ## Overview
 
@@ -71,9 +81,6 @@ Sensor topics
     │    points3D.{bin,txt}
     ▼
 [depth_renderer]
-    │  depth_renders/*.tiff
-    ▼
-[prepare_depth_for_3dgs]
     │  distorted/depth/*.png
     │  distorted/sparse/0/depth_params.json
     ▼
@@ -322,10 +329,10 @@ ros2 run liga_splat export_colmap <data_folder>
 
 ### 5. depth_renderer
 
-Renders a float32 depth map (metres) for each camera pose using the downsampled point cloud. Supports optional hidden-point removal and colour-guided dense completion.
+Renders a depth map for each camera pose using the downsampled point cloud, then immediately converts the result to 16-bit PNG inverse-depth maps and writes `depth_params.json` — the exact format expected by the depth-regularised 3DGS training script. Supports optional hidden-point removal and colour-guided dense completion.
 
 ```bash
-ros2 run liga_splat depth_renderer <data_folder> [--no-hpr] [--dense] [--diag]
+ros2 run liga_splat depth_renderer <data_folder> [--no-hpr] [--dense] [--diag] [--save-tiff]
 ```
 
 | Option | Description |
@@ -333,18 +340,7 @@ ros2 run liga_splat depth_renderer <data_folder> [--no-hpr] [--dense] [--diag]
 | `--no-hpr` | Skip hidden-point removal (faster, less accurate) |
 | `--dense` | Fill gaps using colour-guided joint bilateral filtering |
 | `--diag` | Save false-colour visualisation PNGs to `diagnostics/depth_renders/` |
-
-**Output:** `<depth_dir>/*.tiff`  (default: `depth_renders/`)
-
----
-
-### 6. prepare_depth_for_3dgs
-
-Converts the float32 TIFF depth maps into 16-bit PNG inverse-depth maps and writes `depth_params.json` — the exact format expected by the depth-regularised 3DGS training script.
-
-```bash
-ros2 run liga_splat prepare_depth_for_3dgs <data_folder>
-```
+| `--save-tiff` | Also write intermediate float32 TIFF depth maps to `<depth_dir>/` (useful for debugging) |
 
 **Output:**
 - `distorted/depth/*.png` — 16-bit inverse-depth maps
@@ -395,13 +391,10 @@ ros2 run liga_splat reconstruction $DATA
 # 7. Export COLMAP
 ros2 run liga_splat export_colmap $DATA
 
-# 8. Render depth maps
+# 8. Render depth maps and prepare for 3DGS
 ros2 run liga_splat depth_renderer $DATA --dense
 
-# 9. Convert for 3DGS
-ros2 run liga_splat prepare_depth_for_3dgs $DATA
-
-# 10. Train 3DGS (example — adjust paths as needed)
+# 9. Train 3DGS (example — adjust paths as needed)
 python train.py \
     -s $DATA/distorted \
     -d $DATA/distorted/depth \
@@ -432,6 +425,6 @@ python train.py \
   timestamps/
     image.csv
     odom.csv
-  depth_renders/                      ← float32 TIFF depth maps
-  diagnostics/                        ← optional debug images
+  depth_renders/                      ← float32 TIFF depth maps (only with --save-tiff)
+  diagnostics/                        ← optional debug images (only with --diag)
 ```

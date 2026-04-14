@@ -23,6 +23,8 @@
 
 #include <omp.h>
 
+namespace fs = std::filesystem;
+
 // ========================= Configuration =========================
 struct Config
 {
@@ -47,7 +49,7 @@ struct Config
     // Paths (relative to data_folder)
     std::string downsampled_file = "pcd/downsampled.pcd";
     std::string poses_file = "poses.csv";
-    std::string images_dir = "images";
+    std::string images_dir = "distorted/images";
     std::string depth_dir = "depth_renders";
 };
 
@@ -74,8 +76,8 @@ Config load_config(const std::string & path)
     cfg.min_depth = node["min_depth"].as<double>(cfg.min_depth);
     cfg.max_depth = node["max_depth"].as<double>(cfg.max_depth);
 
-    cfg.depth_render_hpr_radius =   node["depth_render_hpr_radius"].as<double>(cfg.depth_render_hpr_radius);
-    cfg.poses_are_body_frame =      node["poses_are_body_frame"].as<bool>(cfg.poses_are_body_frame);
+    cfg.depth_render_hpr_radius = node["depth_render_hpr_radius"].as<double>(cfg.depth_render_hpr_radius);
+    cfg.poses_are_body_frame    = node["poses_are_body_frame"].as<bool>(cfg.poses_are_body_frame);
 
     if (node["trans_mat"])
     {
@@ -104,6 +106,15 @@ struct ImagePose
     double timestamp;
     double px, py, pz;
     double qx, qy, qz, qw;
+};
+
+struct DepthResult
+{
+    bool        success  = false;
+    std::string out_stem;
+    float       d_min    = 0.0f;
+    float       d_max    = 0.0f;
+    double      coverage = 0.0;
 };
 
 // ========================= Helpers =========================
@@ -216,7 +227,7 @@ std::vector<int> hidden_point_removal(
 }
 
 // Derive output stem from image filename (strip extension)
-std::string stem(const std::string & filename)
+static std::string stem(const std::string & filename)
 {
     auto pos = filename.rfind('.');
     return (pos == std::string::npos) ? filename : filename.substr(0, pos);
@@ -225,8 +236,6 @@ std::string stem(const std::string & filename)
 // ========================= Depth Completion =========================
 
 // Morphological fallback — used when the color guide image cannot be loaded.
-// Large-kernel closing creates halos at near/far boundaries; prefer the
-// guided version below when a colour image is available.
 cv::Mat complete_depth_map_morphological(const cv::Mat & sparse)
 {
     cv::Mat valid_mask = (sparse > 0.0f);
@@ -287,15 +296,12 @@ cv::Mat complete_depth_map_guided(const cv::Mat & sparse,
             spatial_lut[dy * W + dx] = std::exp(-(float)(dy * dy + dx * dx) * inv_2ss);
 
     // Precompute color Gaussian LUT indexed by integer color-diff².
-    // Guide pixels are uint8, so color-diff² is always an integer — LUT is exact.
-    // Cut off at 3σ_c (weight < 0.011) for cheap early-exit on dissimilar colors.
     const float inv_2sc     = 1.0f / (2.0f * sigma_c * sigma_c);
     const int   color_limit = static_cast<int>(9.0f * sigma_c * sigma_c) + 1;
     std::vector<float> color_lut(color_limit);
     for (int i = 0; i < color_limit; i++)
         color_lut[i] = std::exp(-static_cast<float>(i) * inv_2sc);
 
-    // JBF — read from original sparse only, never from a pre-dilated source
     cv::Mat out(sparse.size(), CV_32FC1, cv::Scalar(0.0f));
 
     for (int y = 0; y < sparse.rows; y++)
@@ -320,7 +326,7 @@ cv::Mat complete_depth_map_guided(const cv::Mat & sparse,
             for (int ny = y0; ny <= y1; ny++)
             {
                 const int dy = std::abs(ny - y);
-                const float * d_row  = sparse.ptr<float>(ny);   // ← original sparse only
+                const float * d_row  = sparse.ptr<float>(ny);
                 const uchar * gn_row = guide_bgr.ptr<uchar>(ny);
 
                 for (int nx = x0; nx <= x1; nx++)
@@ -346,10 +352,7 @@ cv::Mat complete_depth_map_guided(const cv::Mat & sparse,
         }
     }
 
-    // Post-fill: small dilation closes residual no-data gaps that had no
-    // color-compatible source within radius (e.g. thin sky slivers).
-    // Safe to run here because `out` already has edge-correct depth values,
-    // so 3–4 px of bleed does not cross foreground/background boundaries.
+    // Post-fill: small dilation closes residual no-data gaps.
     cv::Mat k7 = cv::getStructuringElement(cv::MORPH_ELLIPSE, {7, 7});
     cv::dilate(out, out, k7);
 
@@ -363,18 +366,21 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <data_folder> [--no-hpr] [--dense] [--diag]" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " <data_folder> [--no-hpr] [--dense] [--diag] [--save-tiff]" << std::endl;
         return 1;
     }
 
-    bool use_hpr         = true;
-    bool dense           = false;
+    bool use_hpr          = true;
+    bool dense            = false;
     bool save_diagnostics = false;
+    bool save_tiff        = false;
     for (int i = 2; i < argc; i++)
     {
-        if (std::string(argv[i]) == "--no-hpr") use_hpr = false;
-        if (std::string(argv[i]) == "--dense")  dense   = true;
-        if (std::string(argv[i]) == "--diag")   save_diagnostics = true;
+        if (std::string(argv[i]) == "--no-hpr")    use_hpr          = false;
+        if (std::string(argv[i]) == "--dense")     dense            = true;
+        if (std::string(argv[i]) == "--diag")      save_diagnostics = true;
+        if (std::string(argv[i]) == "--save-tiff") save_tiff        = true;
     }
 
     std::string data_folder = argv[1];
@@ -382,30 +388,38 @@ int main(int argc, char** argv)
 
     Config cfg = load_config(data_folder + "config.cfg");
 
+    // Output paths
+    fs::path tiff_dir    = fs::path(data_folder) / cfg.depth_dir;
+    fs::path png_dir     = fs::path(data_folder) / "distorted/depth";
+    fs::path params_path = fs::path(data_folder) / "distorted/sparse/0/depth_params.json";
+
     std::cout << "=== Depth Renderer ===" << std::endl;
     std::cout << "  Resolution:            " << cfg.img_w << "x" << cfg.img_h << std::endl;
     std::cout << "  Focal length:          " << cfg.f << std::endl;
     std::cout << "  Depth range:          [" << cfg.min_depth << ", " << cfg.max_depth << "] m" << std::endl;
     std::cout << "  Hidden point removal:  " << (use_hpr ? "on" : "off") << std::endl;
-    std::cout << "  HPR factor:            " << (cfg.depth_render_hpr_radius) << std::endl;
+    std::cout << "  HPR radius:            " << cfg.depth_render_hpr_radius << std::endl;
     std::cout << "  Dense completion:      " << (dense  ? "yes (color-guided JBF)" : "no") << std::endl;
+    std::cout << "  Save float32 TIFFs:    " << (save_tiff ? "yes -> " + tiff_dir.string() : "no") << std::endl;
     std::cout << "  Diagnostics:           " << (save_diagnostics ? "yes" : "no") << std::endl;
+    std::cout << "  PNG output:            " << png_dir.string() << std::endl;
+    std::cout << "  depth_params.json:     " << params_path.string() << std::endl;
     std::cout << "======================" << std::endl;
 
-    // ---- Load and preprocess point cloud ----
+    // ---- Load point cloud ----
     auto t_start = std::chrono::high_resolution_clock::now();
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(data_folder + cfg.downsampled_file, *cloud) == -1)
     {
-        std::cerr << "\033[31m" << "Error: Could not load PCD file '" << data_folder + cfg.downsampled_file << "'" << "\033[0m" << std::endl;
+        std::cerr << "\033[31m" << "Error: Could not load PCD file '"
+                  << data_folder + cfg.downsampled_file << "'" << "\033[0m" << std::endl;
         return 1;
     }
     std::cout << "Loaded " << cloud->size() << " points" << std::endl;
 
     int num_points = static_cast<int>(cloud->size());
 
-    // Store as [4 x N] homogeneous for efficient batch transform
     Eigen::Matrix<double, 4, Eigen::Dynamic> points_h(4, num_points);
     for (int i = 0; i < num_points; i++)
     {
@@ -424,12 +438,16 @@ int main(int argc, char** argv)
     std::cout << "Loaded " << image_poses.size() << " image poses" << std::endl;
 
     std::string images_dir = data_folder + cfg.images_dir + "/";
-    std::string out_dir    = data_folder + cfg.depth_dir + "/";
-    std::filesystem::create_directories(out_dir);
+
+    fs::create_directories(png_dir);
+    if (save_tiff)
+        fs::create_directories(tiff_dir);
+
+    fs::create_directories(params_path.parent_path());
 
     std::string diagnostics_dir = data_folder + "diagnostics/depth_renders/";
     if (save_diagnostics)
-        std::filesystem::create_directories(diagnostics_dir);
+        fs::create_directories(diagnostics_dir);
 
     // Precompute FOV tangent thresholds
     double fov_x = 2.0 * std::atan2(cfg.img_w, 2.0 * cfg.f);
@@ -437,15 +455,16 @@ int main(int argc, char** argv)
     double tan_half_fov_x = std::tan(fov_x * 0.5);
     double tan_half_fov_y = std::tan(fov_y * 0.5);
 
-    double margin_x = cfg.img_w * 0.01;
-    double margin_y = cfg.img_h * 0.01;
+    double margin_x   = cfg.img_w * 0.01;
+    double margin_y   = cfg.img_h * 0.01;
     double max_proj_x = cfg.img_w - margin_x;
     double max_proj_y = cfg.img_h - margin_y;
 
+    std::vector<DepthResult> results(image_poses.size());
     int saved = 0;
 
-    // Each image is fully independent (read-only access to points_h), so the loop
-    // is embarrassingly parallel. Each thread gets its own working buffers.
+    // Each image is fully independent (read-only access to points_h), so the
+    // loop is embarrassingly parallel. Each thread gets its own working buffers.
     #pragma omp parallel for schedule(dynamic) reduction(+:saved)
     for (size_t img_idx = 0; img_idx < image_poses.size(); img_idx++)
     {
@@ -522,8 +541,6 @@ int main(int argc, char** argv)
         if (render_indices.empty()) continue;
 
         // ---- Z-buffer depth render ----
-        // Each pixel stores the minimum (closest) depth of all projected points.
-        // 0.0f is used as "no data" sentinel.
         cv::Mat depth_map(cfg.img_h, cfg.img_w, CV_32FC1, cv::Scalar(0.0f));
 
         int projected = 0;
@@ -571,38 +588,78 @@ int main(int argc, char** argv)
             }
         }
 
-        // Save as 32-bit float TIFF (values in metres, 0 = no data).
-        // TIFF is used here because PNG is lossless only for integer types —
-        // float32 depth values would be truncated if written as PNG.
-        // prepare_depth_for_3dgs then converts these TIFFs to 16-bit PNG
-        // inverse-depth maps in the format expected by 3DGS.
-        std::string out_path = out_dir + stem(pose.filename) + ".tiff";
-        if (!cv::imwrite(out_path, depth_map))
+        // Optional: save float32 TIFF (useful for debugging or reprocessing)
+        if (save_tiff)
+        {
+            std::string tiff_path = (tiff_dir / (stem(pose.filename) + ".tiff")).string();
+            if (!cv::imwrite(tiff_path, depth_map))
+            {
+                std::ostringstream msg;
+                msg << "Warning: failed to write '" << tiff_path << "'\n";
+                #pragma omp critical
+                std::cerr << msg.str();
+            }
+        }
+
+        // ---- Convert to 16-bit PNG inverse-depth ----
+        // pixel = round(65536 / depth_metres), clamped to [0, 65535]
+        // pixel = 0 is reserved for no-data (depth == 0)
+        int n_valid = 0;
+        float d_min = std::numeric_limits<float>::max();
+        float d_max = 0.0f;
+
+        cv::Mat depth_u16(cfg.img_h, cfg.img_w, CV_16UC1);
+        for (int r = 0; r < depth_map.rows; r++)
+            for (int c = 0; c < depth_map.cols; c++)
+            {
+                float d = depth_map.at<float>(r, c);
+                if (d <= 0.0f)
+                {
+                    depth_u16.at<uint16_t>(r, c) = 0;
+                }
+                else
+                {
+                    n_valid++;
+                    d_min = std::min(d_min, d);
+                    d_max = std::max(d_max, d);
+                    double inv = 65536.0 / static_cast<double>(d);
+                    depth_u16.at<uint16_t>(r, c) =
+                        static_cast<uint16_t>(std::min(inv + 0.5, 65535.0));
+                }
+            }
+
+        std::string out_stem = stem(pose.filename);
+        fs::path png_path    = png_dir / (out_stem + ".png");
+
+        if (!cv::imwrite(png_path.string(), depth_u16))
         {
             std::ostringstream msg;
-            msg << "Warning: failed to write '" << out_path << "'\n";
+            msg << "Warning: failed to write '" << png_path.string() << "'\n";
             #pragma omp critical
             std::cerr << msg.str();
             continue;
         }
+
+        double coverage = 100.0 * n_valid / (cfg.img_h * cfg.img_w);
+        results[img_idx] = {true, out_stem, d_min, d_max, coverage};
         saved++;
 
-        // Optional false-colour diagnostics PNG (Turbo colormap, black = no data)
+        // Optional false-colour diagnostics PNG
         if (save_diagnostics)
         {
             cv::Mat valid_mask = (depth_map > 0.0f);
-            double d_min, d_max;
-            cv::minMaxLoc(depth_map, &d_min, &d_max, nullptr, nullptr, valid_mask);
+            double dmin_d, dmax_d;
+            cv::minMaxLoc(depth_map, &dmin_d, &dmax_d, nullptr, nullptr, valid_mask);
 
             cv::Mat norm(cfg.img_h, cfg.img_w, CV_8UC1, cv::Scalar(0));
-            if (d_max > d_min)
+            if (dmax_d > dmin_d)
                 cv::normalize(depth_map, norm, 0, 255, cv::NORM_MINMAX, CV_8UC1, valid_mask);
 
             cv::Mat color;
             cv::applyColorMap(norm, color, cv::COLORMAP_TURBO);
-            color.setTo(cv::Scalar(0, 0, 0), ~valid_mask); // black = no data
+            color.setTo(cv::Scalar(0, 0, 0), ~valid_mask);
 
-            cv::imwrite(diagnostics_dir + stem(pose.filename) + ".png", color);
+            cv::imwrite(diagnostics_dir + out_stem + ".png", color);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -611,17 +668,49 @@ int main(int argc, char** argv)
         std::ostringstream msg;
         msg << img_idx << "/" << image_poses.size() - 1
             << " — " << pose.filename
-            << ": " << projected << " depth points projected"
-            << " (" << std::fixed << std::setprecision(2) << elapsed << "s)\n";
+            << ": " << projected << " pts projected"
+            << ", coverage " << std::fixed << std::setprecision(1) << coverage << "%"
+            << ", depth [" << d_min << ", " << d_max << "] m"
+            << " (" << std::setprecision(2) << elapsed << "s)\n";
         #pragma omp critical
         std::cout << msg.str();
     }
 
+    // ---- Write depth_params.json (sequential, sorted order) ----
+    std::ofstream json(params_path);
+    if (!json.is_open())
+    {
+        std::cerr << "\033[31m" << "Error: could not open "
+                  << params_path << " for writing" << "\033[0m" << std::endl;
+        return 1;
+    }
+
+    int written = 0;
+    json << "{\n";
+    for (size_t i = 0; i < results.size(); ++i)
+    {
+        if (!results[i].success) continue;
+        if (written > 0) json << ",\n";
+        json << "  \"" << results[i].out_stem << "\": "
+             << std::fixed << std::setprecision(10)
+             << "{\"scale\": 1.0, \"offset\": 0.0}";
+        written++;
+    }
+    json << "\n}\n";
+    json.close();
+
     auto t_end = std::chrono::high_resolution_clock::now();
     double total = std::chrono::duration<double>(t_end - t_start).count();
 
-    std::cout << "\nDone! Saved " << saved << " depth maps to '" << out_dir << "'"
+    std::cout << "\nDone! Saved " << saved << " depth maps to '" << png_dir.string() << "'"
               << " in " << std::fixed << std::setprecision(1) << total << "s" << std::endl;
+    std::cout << "Wrote " << params_path.string() << std::endl;
+    std::cout << "\n3DGS training command:\n"
+              << "  python train.py \\\n"
+              << "      -s " << data_folder << "distorted \\\n"
+              << "      -d " << png_dir.string() << " \\\n"
+              << "      --depth_params " << params_path.string() << " \\\n"
+              << "      <other args>" << std::endl;
 
     return 0;
 }

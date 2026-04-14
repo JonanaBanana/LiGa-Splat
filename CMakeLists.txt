@@ -202,8 +202,5 @@ target_include_directories(depth_renderer PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_I
 target_link_libraries(depth_renderer ${PCL_LIBRARIES} ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
 install(TARGETS depth_renderer DESTINATION lib/${PROJECT_NAME})
 
-add_executable(prepare_depth_for_3dgs utils/prepare_depth_for_3dgs.cpp)
-target_link_libraries(prepare_depth_for_3dgs ${OpenCV_LIBS} yaml-cpp OpenMP::OpenMP_CXX)
-install(TARGETS prepare_depth_for_3dgs DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
