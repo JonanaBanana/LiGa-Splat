@@ -4,7 +4,7 @@
   <img src="image_samples/depth_render.png" width="32%"/>
 </p>
 <p align="center">
-  <video src="image_samples/reconstruction.webm" autoplay loop muted playsinline width="100%"></video>
+  <img src="image_samples/reconstruction.gif" width="100%"/>
 </p>
 
 # LiGa Splat - LiDAR-Guided 3D Gaussian Splatting Pipeline
